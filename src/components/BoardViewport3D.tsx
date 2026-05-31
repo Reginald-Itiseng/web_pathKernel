@@ -1,6 +1,6 @@
 import { Suspense, useMemo } from 'react';
 import { Canvas } from '@react-three/fiber';
-import { Grid, OrbitControls, GizmoHelper, GizmoViewport } from '@react-three/drei';
+import { Grid, OrbitControls, GizmoHelper, GizmoViewport, Line, Html } from '@react-three/drei';
 import * as THREE from 'three';
 
 const FR4_THICKNESS = 1.6; // mm
@@ -52,6 +52,7 @@ export function BoardViewport3D({ boardXMin, boardYMin, boardWidth, boardHeight 
         <Suspense fallback={null}>
           <FrSubstrate cx={cx} cz={cz} width={boardWidth} height={boardHeight} />
           <SceneGrid cx={cx} cz={cz} boardWidth={boardWidth} boardHeight={boardHeight} />
+          <OriginMarker maxDim={maxDim} />
         </Suspense>
 
         <OrbitControls
@@ -119,5 +120,43 @@ function SceneGrid({
       followCamera={false}
       infiniteGrid={false}
     />
+  );
+}
+
+/**
+ * Marks Gerber (0, 0) with two axis arms and a label.
+ * Red arm  → +X (Gerber X)
+ * Green arm → +Z (Gerber Y)
+ */
+function OriginMarker({ maxDim }: { maxDim: number }) {
+  const arm = Math.max(2, maxDim * 0.06);  // arm length scales with board
+  const dot = arm * 0.12;
+  const y   = -FR4_THICKNESS / 2 - 0.05;  // sit just on the work-surface plane
+
+  return (
+    <group position={[0, y, 0]}>
+      {/* +X arm — red */}
+      <Line points={[[0, 0, 0], [arm, 0, 0]]} color="#f87171" lineWidth={2} />
+      {/* +Z arm — green (= Gerber +Y) */}
+      <Line points={[[0, 0, 0], [0, 0, arm]]} color="#4ade80" lineWidth={2} />
+      {/* Origin dot */}
+      <mesh>
+        <sphereGeometry args={[dot, 12, 12]} />
+        <meshBasicMaterial color="white" />
+      </mesh>
+      {/* Label */}
+      <Html position={[arm * 0.35, dot * 2, arm * 0.35]} center>
+        <span style={{
+          color: '#94a3b8',
+          fontSize: '11px',
+          fontFamily: 'monospace',
+          whiteSpace: 'nowrap',
+          userSelect: 'none',
+          textShadow: '0 1px 3px #000, 0 0 6px #000',
+        }}>
+          (0, 0)
+        </span>
+      </Html>
+    </group>
   );
 }
