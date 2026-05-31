@@ -33,10 +33,56 @@ const EXT_TO_LAYER: Record<string, LayerType> = {
   art: 'unknown',
 };
 
+/**
+ * KiCad exports every Gerber layer with a `.gbr` extension and encodes the
+ * layer in the filename suffix.  We try the extension map first (handles
+ * Protel / RS-274X naming), then fall back to a filename-suffix scan for
+ * KiCad ≥5 and ≥6 conventions.
+ *
+ * KiCad 5  uses dots:       project-F.Cu.gbr, project-Edge.Cuts.gbr …
+ * KiCad 6+ uses underscores: project-F_Cu.gbr, project-Edge_Cuts.gbr …
+ */
 export function detectLayerType(filename: string): LayerType {
-  const ext = filename.split('.').pop()?.toLowerCase() ?? '';
-  return EXT_TO_LAYER[ext] ?? 'unknown';
+  const lower = filename.toLowerCase();
+  const ext   = lower.split('.').pop() ?? '';
+
+  // 1. Fast-path: unambiguous extension
+  const byExt = EXT_TO_LAYER[ext];
+  if (byExt && byExt !== 'unknown') return byExt;
+
+  // 2. KiCad filename-suffix detection (both dot and underscore variants)
+  if (SUFFIX_MATCH.test(lower)) {
+    for (const [pattern, type] of KICAD_SUFFIXES) {
+      if (pattern.test(lower)) return type;
+    }
+  }
+
+  return byExt ?? 'unknown';
 }
+
+/** Quick pre-filter — only run the heavy loop if the file looks like a KiCad export */
+const SUFFIX_MATCH = /[-_](f|b)[._]/;
+
+/**
+ * Ordered list of [regex, LayerType] pairs.
+ * Patterns match against the lowercased full filename.
+ * More-specific rules come first.
+ */
+const KICAD_SUFFIXES: [RegExp, LayerType][] = [
+  // Copper
+  [/[-_]f[._]cu\b/, 'top-copper'],
+  [/[-_]b[._]cu\b/, 'bottom-copper'],
+  // Silkscreen  (KiCad 6: Silkscreen, KiCad 5: SilkS)
+  [/[-_]f[._](silkscreen|silks)\b/, 'top-silkscreen'],
+  [/[-_]b[._](silkscreen|silks)\b/, 'bottom-silkscreen'],
+  // Soldermask
+  [/[-_]f[._]mask\b/, 'top-soldermask'],
+  [/[-_]b[._]mask\b/, 'bottom-soldermask'],
+  // Board outline (Edge.Cuts / Edge_Cuts)
+  [/[-_]edge[._]cuts\b/, 'board-outline'],
+  // Drill  (KiCad sometimes names these .gbr too)
+  [/[-_](npth|pth|drill)[._]/, 'drill'],
+];
 
 export const LAYER_LABELS: Record<LayerType, string> = {
   'top-copper': 'Top Copper',
