@@ -103,13 +103,13 @@ export function computeUnionViewBox(
  * map into the same mm coordinate space as the other layers.
  */
 export function buildCompositeSvg(
-  layers: Array<Pick<LayerEntry, 'id' | 'result'>>,
+  layers: Array<Pick<LayerEntry, 'id' | 'result' | 'color'>>,
   unionViewBox: [number, number, number, number],
 ): string {
   const [uvX, uvY, uvW, uvH] = unionViewBox;
   const domParser = new DOMParser();
 
-  const nestedSvgs = layers.map(({ result }) => {
+  const nestedSvgs = layers.map(({ result, color }) => {
     const naturalVb = result.viewBox ?? unionViewBox;
     const [nvX, nvY, nvW, nvH] = naturalVb;
 
@@ -120,7 +120,9 @@ export function buildCompositeSvg(
     const vw = nvW * scale;
     const vh = nvH * scale;
 
-    // Extract the inner XML of the layer SVG (defs + layer group)
+    // Extract the inner XML of the layer SVG (defs + layer group).
+    // The original outer <svg> had the `color` attribute on it; we carry that
+    // forward onto the nested <svg> so currentColor resolves correctly per layer.
     const doc = domParser.parseFromString(result.svgString, 'image/svg+xml');
     const inner = Array.from(doc.documentElement.childNodes)
       .map((n) => new XMLSerializer().serializeToString(n))
@@ -128,7 +130,7 @@ export function buildCompositeSvg(
 
     return (
       `<svg x="${vx}" y="${vy}" width="${vw}" height="${vh}" ` +
-      `viewBox="${nvX} ${nvY} ${nvW} ${nvH}" overflow="visible">` +
+      `viewBox="${nvX} ${nvY} ${nvW} ${nvH}" overflow="visible" color="${color}">` +
       inner +
       `</svg>`
     );
