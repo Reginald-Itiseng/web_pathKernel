@@ -1,13 +1,19 @@
-import React, { Suspense, lazy, useState } from 'react';
-import { prepareSvgForDisplay, type ParseResult } from '../utils/gerberUtils';
+import React, { Suspense, lazy, useState, useCallback } from 'react';
+import {
+  computeUnionViewBox,
+  prepareSvgWithViewBox,
+  prepareSvgForDisplay,
+  type LayerEntry,
+} from '../utils/gerberUtils';
+import { LAYER_Z_ORDER } from '../utils/layerUtils';
 
 const BoardViewport3D = lazy(() =>
   import('./BoardViewport3D').then((m) => ({ default: m.BoardViewport3D })),
 );
 
 interface Props {
-  result: ParseResult;
-  onClear: () => void;
+  layers: LayerEntry[];
+  onAddFiles: (files: File[]) => void;
 }
 
 type Tab = '2d' | '3d';
@@ -16,16 +22,42 @@ const MIN_ZOOM = 0.15;
 const MAX_ZOOM = 8;
 const ZOOM_STEP = 1.25;
 
-export function GerberPreview({ result, onClear }: Props) {
+export function GerberPreview({ layers, onAddFiles }: Props) {
   const [tab, setTab] = useState<Tab>('2d');
   const [zoom, setZoom] = useState(1);
+  const [dropOver, setDropOver] = useState(false);
 
   const zoomIn = () => setZoom((z) => Math.min(z * ZOOM_STEP, MAX_ZOOM));
   const zoomOut = () => setZoom((z) => Math.max(z / ZOOM_STEP, MIN_ZOOM));
   const fitScreen = () => setZoom(1);
 
-  const preparedSvg = prepareSvgForDisplay(result.svgString);
-  const has3d = result.width != null && result.height != null;
+  const handleDrop = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      setDropOver(false);
+      const files = Array.from(e.dataTransfer.files);
+      if (files.length) onAddFiles(files);
+    },
+    [onAddFiles],
+  );
+
+  const visibleLayers = [...layers]
+    .filter((l) => l.visible)
+    .sort((a, b) => LAYER_Z_ORDER[a.layerType] - LAYER_Z_ORDER[b.layerType]);
+
+  const unionViewBox = computeUnionViewBox(visibleLayers.map((l) => l.result));
+
+  const preparedLayers = visibleLayers.map((layer) => ({
+    id: layer.id,
+    html: unionViewBox
+      ? prepareSvgWithViewBox(layer.result.svgString, unionViewBox)
+      : prepareSvgForDisplay(layer.result.svgString),
+  }));
+
+  const firstUnits = layers.find((l) => l.result.units)?.result.units ?? 'mm';
+  const boardW = unionViewBox ? (unionViewBox[2] / 1000) : null;
+  const boardH = unionViewBox ? (unionViewBox[3] / 1000) : null;
+  const has3d = boardW != null && boardH != null;
 
   return (
     <div className="flex flex-col h-full">
@@ -35,27 +67,45 @@ export function GerberPreview({ result, onClear }: Props) {
           2D Preview
         </TabButton>
         <TabButton active={tab === '3d'} onClick={() => setTab('3d')} disabled={!has3d}>
-          3D View{!has3d && <span className="ml-1 text-zinc-600 text-xs">(no dims)</span>}
+          3D View
         </TabButton>
+        <span className="ml-auto text-xs text-zinc-500">
+          {visibleLayers.length} of {layers.length} layer{layers.length !== 1 ? 's' : ''} visible
+        </span>
       </div>
 
-      {/* Canvas area */}
-      <div className="relative flex-1 overflow-hidden preview-grid rounded-xl">
-        {/* 2D panel */}
+      {/* Canvas */}
+      <div
+        className="relative flex-1 overflow-hidden preview-grid rounded-xl"
+        onDragOver={(e) => { e.preventDefault(); setDropOver(true); }}
+        onDragLeave={() => setDropOver(false)}
+        onDrop={handleDrop}
+      >
+        {/* Drop-to-add overlay */}
+        {dropOver && (
+          <div className="absolute inset-0 z-20 flex items-center justify-center rounded-xl border-2 border-green-400 bg-green-400/10 pointer-events-none">
+            <p className="text-green-300 font-semibold text-lg">Drop to add layer</p>
+          </div>
+        )}
+
+        {/* 2D composite */}
         {tab === '2d' && (
           <>
-            <div className="absolute inset-0 flex items-center justify-center p-4">
-              <div
-                style={{
-                  width: '100%',
-                  height: '100%',
-                  transform: `scale(${zoom})`,
-                  transformOrigin: 'center center',
-                  transition: 'transform 0.12s ease',
-                }}
-                className="gerber-svg-wrapper"
-                dangerouslySetInnerHTML={{ __html: preparedSvg }}
-              />
+            <div
+              className="absolute inset-0 p-4"
+              style={{
+                transform: `scale(${zoom})`,
+                transformOrigin: 'center center',
+                transition: 'transform 0.12s ease',
+              }}
+            >
+              {preparedLayers.map((layer) => (
+                <div
+                  key={layer.id}
+                  className="absolute inset-0 gerber-svg-wrapper"
+                  dangerouslySetInnerHTML={{ __html: layer.html }}
+                />
+              ))}
             </div>
 
             {/* Zoom controls */}
@@ -81,7 +131,7 @@ export function GerberPreview({ result, onClear }: Props) {
           </>
         )}
 
-        {/* 3D panel — lazy loaded so Three.js doesn't block initial render */}
+        {/* 3D panel */}
         {tab === '3d' && has3d && (
           <div className="absolute inset-0">
             <Suspense fallback={
@@ -90,41 +140,39 @@ export function GerberPreview({ result, onClear }: Props) {
                 Loading 3D…
               </div>
             }>
-              <BoardViewport3D
-                boardWidth={result.width!}
-                boardHeight={result.height!}
-              />
+              <BoardViewport3D boardWidth={boardW!} boardHeight={boardH!} />
             </Suspense>
           </div>
         )}
 
-        {/* 3D hint label */}
         {tab === '3d' && (
           <div className="absolute bottom-3 left-3 text-xs text-zinc-500 bg-zinc-900/80 rounded px-2 py-1 pointer-events-none">
             Orbit · Scroll to zoom · Right-drag to pan
           </div>
         )}
+
+        {/* Drag-to-add hint */}
+        {tab === '2d' && !dropOver && (
+          <div className="absolute bottom-3 left-3 text-xs text-zinc-600 pointer-events-none">
+            Drag more files here to add layers
+          </div>
+        )}
       </div>
 
-      {/* Dimensions + clear row */}
-      <div className="mt-3 flex items-center justify-between gap-4">
-        <DimensionBadges result={result} />
-        <button
-          onClick={onClear}
-          className="shrink-0 px-4 py-2 text-sm text-zinc-300 hover:text-zinc-100 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded-lg transition-colors"
-        >
-          Clear / Load new file
-        </button>
-      </div>
+      {/* Board dimensions row */}
+      {boardW && boardH && (
+        <div className="mt-2 flex items-center gap-2">
+          <span className="px-3 py-1 rounded-full bg-zinc-800 border border-zinc-700 text-zinc-300 text-xs font-mono">
+            {boardW.toFixed(2)} × {boardH.toFixed(2)} {firstUnits}
+          </span>
+        </div>
+      )}
     </div>
   );
 }
 
 function TabButton({
-  active,
-  onClick,
-  disabled,
-  children,
+  active, onClick, disabled, children,
 }: {
   active: boolean;
   onClick: () => void;
@@ -147,37 +195,7 @@ function TabButton({
   );
 }
 
-function DimensionBadges({ result }: { result: ParseResult }) {
-  const { width, height, units, defsCount, layerCount } = result;
-  const hasSize = width != null && height != null;
-
-  return (
-    <div className="flex flex-wrap items-center gap-2">
-      {hasSize && (
-        <span className="px-3 py-1 rounded-full bg-zinc-800 border border-zinc-700 text-zinc-300 text-xs font-mono">
-          {width!.toFixed(2)} × {height!.toFixed(2)} {units ?? 'mm'}
-        </span>
-      )}
-      {defsCount > 0 && (
-        <span className="px-3 py-1 rounded-full bg-zinc-800 border border-zinc-700 text-zinc-400 text-xs">
-          {defsCount} pad{defsCount !== 1 ? 's' : ''}
-        </span>
-      )}
-      {layerCount > 0 && (
-        <span className="px-3 py-1 rounded-full bg-zinc-800 border border-zinc-700 text-zinc-400 text-xs">
-          {layerCount} element{layerCount !== 1 ? 's' : ''}
-        </span>
-      )}
-    </div>
-  );
-}
-
-function ZoomButton({
-  onClick,
-  title,
-  disabled,
-  children,
-}: {
+function ZoomButton({ onClick, title, disabled, children }: {
   onClick: () => void;
   title: string;
   disabled?: boolean;
@@ -196,25 +214,11 @@ function ZoomButton({
 }
 
 function PlusIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-      <path d="M8 3v10M3 8h10" />
-    </svg>
-  );
+  return <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M8 3v10M3 8h10" /></svg>;
 }
-
 function MinusIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-      <path d="M3 8h10" />
-    </svg>
-  );
+  return <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M3 8h10" /></svg>;
 }
-
 function FitIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M1 5V2h3M12 2h3v3M15 11v3h-3M4 14H1v-3" />
-    </svg>
-  );
+  return <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M1 5V2h3M12 2h3v3M15 11v3h-3M4 14H1v-3" /></svg>;
 }

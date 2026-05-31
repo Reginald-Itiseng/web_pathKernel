@@ -50,6 +50,19 @@ export const LAYER_LABELS: Record<LayerType, string> = {
   unknown: 'Unknown Layer',
 };
 
+/** Higher number = rendered on top in the composite stack. */
+export const LAYER_Z_ORDER: Record<LayerType, number> = {
+  'board-outline': 8,
+  'top-silkscreen': 7,
+  'bottom-silkscreen': 6,
+  'top-soldermask': 5,
+  'bottom-soldermask': 4,
+  'top-copper': 3,
+  'bottom-copper': 2,
+  drill: 1,
+  unknown: 0,
+};
+
 export const LAYER_COLORS: Record<LayerType, string> = {
   'top-copper': '#d4a843',
   'bottom-copper': '#4a9eda',

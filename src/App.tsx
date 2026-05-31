@@ -2,48 +2,84 @@ import { useState, useCallback } from 'react';
 import { GerberDropzone } from './components/GerberDropzone';
 import { GerberPreview } from './components/GerberPreview';
 import { LayerInfo } from './components/LayerInfo';
-import { parseGerber, type ParseResult } from './utils/gerberUtils';
+import { parseGerber, type LayerEntry } from './utils/gerberUtils';
 import { LAYER_COLORS, detectLayerType } from './utils/layerUtils';
 
-interface AppState {
-  file: File | null;
-  result: ParseResult | null;
-  error: string | null;
-  loading: boolean;
+interface ParseError {
+  filename: string;
+  message: string;
 }
 
-const INITIAL: AppState = {
-  file: null,
-  result: null,
-  error: null,
-  loading: false,
-};
+interface AppState {
+  layers: LayerEntry[];
+  parsing: boolean;
+  errors: ParseError[];
+}
+
+const INITIAL: AppState = { layers: [], parsing: false, errors: [] };
 
 export default function App() {
   const [state, setState] = useState<AppState>(INITIAL);
 
-  const handleFile = useCallback(async (file: File) => {
-    setState({ file, result: null, error: null, loading: true });
+  const handleFiles = useCallback(async (files: File[]) => {
+    setState((s) => ({ ...s, parsing: true }));
 
-    try {
-      const content = await readFileAsText(file);
-      const layerType = detectLayerType(file.name);
-      const color = LAYER_COLORS[layerType];
-      const result = await parseGerber(content, color);
-      setState({ file, result, error: null, loading: false });
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : 'Unknown parse error';
-      setState({ file, result: null, error: message, loading: false });
+    const newLayers: LayerEntry[] = [];
+    const newErrors: ParseError[] = [];
+
+    for (const file of files) {
+      try {
+        const content = await readFileAsText(file);
+        const layerType = detectLayerType(file.name);
+        const color = LAYER_COLORS[layerType];
+        const result = await parseGerber(content, color);
+        newLayers.push({
+          id: crypto.randomUUID(),
+          file,
+          result,
+          layerType,
+          color,
+          visible: true,
+        });
+      } catch (err) {
+        newErrors.push({
+          filename: file.name,
+          message: err instanceof Error ? err.message : 'Parse failed',
+        });
+      }
     }
+
+    setState((s) => ({
+      layers: [...s.layers, ...newLayers],
+      parsing: false,
+      errors: [...s.errors, ...newErrors],
+    }));
   }, []);
 
-  const handleClear = useCallback(() => {
-    setState(INITIAL);
+  const toggleLayer = useCallback((id: string) => {
+    setState((s) => ({
+      ...s,
+      layers: s.layers.map((l) =>
+        l.id === id ? { ...l, visible: !l.visible } : l,
+      ),
+    }));
   }, []);
 
-  const { file, result, error, loading } = state;
-  const hasFile = file !== null;
+  const removeLayer = useCallback((id: string) => {
+    setState((s) => ({ ...s, layers: s.layers.filter((l) => l.id !== id) }));
+  }, []);
+
+  const dismissError = useCallback((filename: string) => {
+    setState((s) => ({
+      ...s,
+      errors: s.errors.filter((e) => e.filename !== filename),
+    }));
+  }, []);
+
+  const clearAll = useCallback(() => setState(INITIAL), []);
+
+  const { layers, parsing, errors } = state;
+  const hasLayers = layers.length > 0 || parsing || errors.length > 0;
 
   return (
     <div className="h-full flex flex-col bg-zinc-950 text-zinc-200">
@@ -51,9 +87,7 @@ export default function App() {
       <header className="shrink-0 flex items-center gap-3 px-5 h-12 border-b border-zinc-800 bg-zinc-900">
         <div className="flex items-center gap-2">
           <PcbIcon className="w-5 h-5 text-green-400" />
-          <span className="font-semibold text-zinc-100 tracking-tight">
-            PCB Mill CAM
-          </span>
+          <span className="font-semibold text-zinc-100 tracking-tight">PCB Mill CAM</span>
         </div>
         <span className="px-2 py-0.5 rounded-full bg-zinc-800 border border-zinc-700 text-xs text-zinc-400">
           Phase 1 — Preview
@@ -62,27 +96,28 @@ export default function App() {
 
       {/* Body */}
       <div className="flex flex-1 overflow-hidden">
-        {/* Sidebar — only shown once a file is loaded */}
-        {hasFile && result && (
-          <div className="shrink-0 w-60 border-r border-zinc-800 bg-zinc-950 p-4 overflow-y-auto">
-            <LayerInfo file={file} result={result} />
+        {/* Sidebar */}
+        {hasLayers && (
+          <div className="shrink-0 w-60 border-r border-zinc-800 bg-zinc-950 p-4 overflow-hidden flex flex-col">
+            <LayerInfo
+              layers={layers}
+              parsing={parsing}
+              errors={errors}
+              onToggle={toggleLayer}
+              onRemove={removeLayer}
+              onAddFiles={handleFiles}
+              onDismissError={dismissError}
+              onClearAll={clearAll}
+            />
           </div>
         )}
 
-        {/* Main content */}
+        {/* Main */}
         <main className="flex-1 p-4 overflow-hidden">
-          {loading && <LoadingState />}
-
-          {!loading && error && (
-            <ErrorState message={error} onClear={handleClear} />
-          )}
-
-          {!loading && !error && result && (
-            <GerberPreview result={result} onClear={handleClear} />
-          )}
-
-          {!loading && !error && !result && (
-            <GerberDropzone onFile={handleFile} />
+          {hasLayers ? (
+            <GerberPreview layers={layers} onAddFiles={handleFiles} />
+          ) : (
+            <GerberDropzone onFiles={handleFiles} />
           )}
         </main>
       </div>
@@ -90,54 +125,9 @@ export default function App() {
   );
 }
 
-function LoadingState() {
-  return (
-    <div className="flex flex-col items-center justify-center h-full gap-4">
-      <div className="w-9 h-9 rounded-full border-2 border-green-400 border-t-transparent animate-spin" />
-      <p className="text-zinc-400 text-sm">Parsing Gerber file…</p>
-    </div>
-  );
-}
-
-function ErrorState({
-  message,
-  onClear,
-}: {
-  message: string;
-  onClear: () => void;
-}) {
-  return (
-    <div className="flex flex-col items-center justify-center h-full gap-6 text-center px-8">
-      <div className="w-12 h-12 rounded-full bg-red-500/10 flex items-center justify-center">
-        <span className="text-red-400 text-xl">!</span>
-      </div>
-      <div>
-        <p className="text-zinc-200 font-semibold mb-2">Failed to parse file</p>
-        <p className="text-zinc-400 text-sm font-mono bg-zinc-900 border border-zinc-800 rounded-lg px-4 py-3 max-w-md break-all">
-          {message}
-        </p>
-      </div>
-      <button
-        onClick={onClear}
-        className="px-5 py-2 text-sm font-medium text-zinc-900 bg-green-400 hover:bg-green-300 rounded-lg transition-colors"
-      >
-        Try another file
-      </button>
-    </div>
-  );
-}
-
 function PcbIcon({ className }: { className?: string }) {
   return (
-    <svg
-      className={className}
-      viewBox="0 0 20 20"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
+    <svg className={className} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
       <rect x="2" y="2" width="16" height="16" rx="2" />
       <path d="M6 6h2v2H6zM12 6h2v2h-2zM6 12h2v2H6zM12 12h2v2h-2z" />
       <path d="M8 7h4M7 8v4M13 8v4M8 13h4" />

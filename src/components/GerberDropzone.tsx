@@ -4,10 +4,10 @@ const ACCEPTED = '.gbr,.gtl,.gbl,.gts,.gbs,.ger,.art,.gto,.gbo,.gko,.drl';
 const DISPLAY_EXTS = ['.gbr', '.gtl', '.gbl', '.gts', '.gbs', '.ger', '.art'];
 
 interface Props {
-  onFile: (file: File) => void;
+  onFiles: (files: File[]) => void;
 }
 
-export function GerberDropzone({ onFile }: Props) {
+export function GerberDropzone({ onFiles }: Props) {
   const [dragOver, setDragOver] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -15,26 +15,26 @@ export function GerberDropzone({ onFile }: Props) {
     (e: React.DragEvent) => {
       e.preventDefault();
       setDragOver(false);
-      const file = e.dataTransfer.files[0];
-      if (file) onFile(file);
+      const files = Array.from(e.dataTransfer.files);
+      if (files.length) onFiles(files);
     },
-    [onFile],
+    [onFiles],
   );
 
   const handleChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0];
-      if (file) onFile(file);
+      const files = Array.from(e.target.files ?? []);
+      if (files.length) onFiles(files);
       e.target.value = '';
     },
-    [onFile],
+    [onFiles],
   );
 
   return (
     <div
       role="button"
       tabIndex={0}
-      aria-label="Drop Gerber file or click to browse"
+      aria-label="Drop Gerber files or click to browse"
       className={[
         'flex flex-col items-center justify-center h-full rounded-xl border-2 border-dashed',
         'transition-colors duration-150 cursor-pointer select-none outline-none',
@@ -43,10 +43,7 @@ export function GerberDropzone({ onFile }: Props) {
           ? 'border-green-400 bg-green-400/5'
           : 'border-zinc-700 hover:border-zinc-500',
       ].join(' ')}
-      onDragOver={(e) => {
-        e.preventDefault();
-        setDragOver(true);
-      }}
+      onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
       onDragLeave={() => setDragOver(false)}
       onDrop={handleDrop}
       onClick={() => inputRef.current?.click()}
@@ -56,6 +53,7 @@ export function GerberDropzone({ onFile }: Props) {
         ref={inputRef}
         type="file"
         accept={ACCEPTED}
+        multiple
         className="hidden"
         onChange={handleChange}
       />
@@ -68,9 +66,10 @@ export function GerberDropzone({ onFile }: Props) {
           ].join(' ')}
         />
         <p className="text-zinc-200 text-lg font-semibold mb-2">
-          Drop a Gerber file here
+          Drop Gerber files here
         </p>
-        <p className="text-zinc-400 text-sm mb-6">or click to browse</p>
+        <p className="text-zinc-400 text-sm mb-1">or click to browse</p>
+        <p className="text-zinc-600 text-xs mb-6">You can select multiple files at once</p>
         <div className="flex flex-wrap gap-2 justify-center">
           {DISPLAY_EXTS.map((ext) => (
             <span
