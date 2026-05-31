@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useRef, useState, useEffect } from 'react';
 import type { LayerEntry, DrillFormatOptions } from '../utils/gerberUtils';
 import { LAYER_LABELS, LAYER_COLORS } from '../utils/layerUtils';
 import { computeUnionViewBox } from '../utils/gerberUtils';
@@ -38,6 +38,8 @@ function placesToKey(p?: [number, number]): string {
 interface Props {
   layers: LayerEntry[];
   parsing: boolean;
+  /** IDs of drill layers currently being re-parsed. */
+  reparsing: Set<string>;
   errors: Array<{ filename: string; message: string }>;
   onToggle: (id: string) => void;
   onRemove: (id: string) => void;
@@ -50,7 +52,7 @@ interface Props {
 // ─── Root component ──────────────────────────────────────────────────────────
 
 export function LayerInfo({
-  layers, parsing, errors,
+  layers, parsing, reparsing, errors,
   onToggle, onRemove, onAddFiles, onDismissError, onClearAll, onReparseLayer,
 }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -88,6 +90,7 @@ export function LayerInfo({
           <LayerRow
             key={layer.id}
             layer={layer}
+            isReparsing={reparsing.has(layer.id)}
             onToggle={() => onToggle(layer.id)}
             onRemove={() => onRemove(layer.id)}
             onReparse={(fmt) => onReparseLayer(layer.id, fmt)}
@@ -129,8 +132,9 @@ export function LayerInfo({
 
 // ─── Layer row ───────────────────────────────────────────────────────────────
 
-function LayerRow({ layer, onToggle, onRemove, onReparse }: {
+function LayerRow({ layer, isReparsing, onToggle, onRemove, onReparse }: {
   layer: LayerEntry;
+  isReparsing: boolean;
   onToggle: () => void;
   onRemove: () => void;
   onReparse: (fmt: DrillFormatOptions) => void;
@@ -139,6 +143,15 @@ function LayerRow({ layer, onToggle, onRemove, onReparse }: {
   const isDrill = layer.layerType === 'drill';
   const color   = LAYER_COLORS[layer.layerType];
   const label   = LAYER_LABELS[layer.layerType];
+
+  // Auto-close the panel once a re-parse completes successfully
+  const prevReparsing = useRef(isReparsing);
+  useEffect(() => {
+    if (prevReparsing.current && !isReparsing) {
+      setOpen(false);
+    }
+    prevReparsing.current = isReparsing;
+  }, [isReparsing]);
 
   return (
     <div className="rounded-lg overflow-hidden">
@@ -178,11 +191,13 @@ function LayerRow({ layer, onToggle, onRemove, onReparse }: {
         </div>
       </div>
 
-      {/* Drill format panel */}
+      {/* Drill format panel — stays open while re-parsing so the user
+          can see it's working and isn't left wondering if anything happened */}
       {isDrill && open && (
         <DrillFormatPanel
           committed={layer.drillFormat ?? {}}
-          onReparse={(fmt) => { onReparse(fmt); setOpen(false); }}
+          isReparsing={isReparsing}
+          onReparse={onReparse}
         />
       )}
     </div>
@@ -191,8 +206,9 @@ function LayerRow({ layer, onToggle, onRemove, onReparse }: {
 
 // ─── Drill format panel ──────────────────────────────────────────────────────
 
-function DrillFormatPanel({ committed, onReparse }: {
+function DrillFormatPanel({ committed, isReparsing, onReparse }: {
   committed: DrillFormatOptions;
+  isReparsing: boolean;
   onReparse: (fmt: DrillFormatOptions) => void;
 }) {
   const [fmt, setFmt] = useState<DrillFormatOptions>(committed);
@@ -202,13 +218,12 @@ function DrillFormatPanel({ committed, onReparse }: {
     fmt.units  !== committed.units  ||
     placesToKey(fmt.places) !== placesToKey(committed.places);
 
-  function set<K extends keyof DrillFormatOptions>(key: K, raw: string) {
-    if (key === 'places') {
-      const preset = PLACES_OPTIONS.find((o) => o.value === raw);
-      setFmt((f) => ({ ...f, places: preset?.places }));
-    } else {
-      setFmt((f) => ({ ...f, [key]: raw || undefined }));
-    }
+  function set(key: 'zero' | 'units', raw: string) {
+    setFmt((f) => ({ ...f, [key]: (raw as 'L' | 'T' | 'mm' | 'in') || undefined }));
+  }
+  function setPlaces(raw: string) {
+    const preset = PLACES_OPTIONS.find((o) => o.value === raw);
+    setFmt((f) => ({ ...f, places: preset?.places }));
   }
 
   return (
@@ -220,7 +235,9 @@ function DrillFormatPanel({ committed, onReparse }: {
         <select
           value={fmt.zero ?? ''}
           onChange={(e) => set('zero', e.target.value)}
-          className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-200 focus:outline-none focus:border-green-500"
+          disabled={isReparsing}
+          className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-200
+            focus:outline-none focus:border-green-500 disabled:opacity-50"
         >
           {ZERO_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
         </select>
@@ -230,8 +247,10 @@ function DrillFormatPanel({ committed, onReparse }: {
         <span className="text-xs text-zinc-500">Decimal format</span>
         <select
           value={placesToKey(fmt.places)}
-          onChange={(e) => set('places', e.target.value)}
-          className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-200 focus:outline-none focus:border-green-500"
+          onChange={(e) => setPlaces(e.target.value)}
+          disabled={isReparsing}
+          className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-200
+            focus:outline-none focus:border-green-500 disabled:opacity-50"
         >
           {PLACES_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
         </select>
@@ -242,7 +261,9 @@ function DrillFormatPanel({ committed, onReparse }: {
         <select
           value={fmt.units ?? ''}
           onChange={(e) => set('units', e.target.value)}
-          className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-200 focus:outline-none focus:border-green-500"
+          disabled={isReparsing}
+          className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-200
+            focus:outline-none focus:border-green-500 disabled:opacity-50"
         >
           {UNITS_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
         </select>
@@ -250,14 +271,20 @@ function DrillFormatPanel({ committed, onReparse }: {
 
       <button
         onClick={() => onReparse(fmt)}
-        disabled={!dirty}
+        disabled={!dirty || isReparsing}
         className="w-full mt-0.5 py-1.5 text-xs font-medium rounded transition-colors
           bg-green-500 hover:bg-green-400 text-zinc-900
-          disabled:opacity-30 disabled:cursor-not-allowed"
+          disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center gap-2"
       >
-        Re-parse
+        {isReparsing ? (
+          <>
+            <span className="w-3 h-3 rounded-full border border-zinc-900 border-t-transparent animate-spin" />
+            Parsing…
+          </>
+        ) : 'Re-parse'}
       </button>
-      {dirty && (
+
+      {dirty && !isReparsing && (
         <p className="text-xs text-amber-400 text-center">Unsaved changes</p>
       )}
     </div>
