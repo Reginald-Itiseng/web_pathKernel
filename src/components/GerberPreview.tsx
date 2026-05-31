@@ -57,9 +57,12 @@ export function GerberPreview({ layers, onAddFiles }: Props) {
       : null;
 
   const firstUnits = layers.find((l) => l.result.units)?.result.units ?? 'mm';
-  const boardW = unionViewBox ? (unionViewBox[2] / 1000) : null;
-  const boardH = unionViewBox ? (unionViewBox[3] / 1000) : null;
-  const has3d = boardW != null && boardH != null;
+  // All four values in mm (viewBox units are ×1000)
+  const boardXMin = unionViewBox ? unionViewBox[0] / 1000 : null;
+  const boardYMin = unionViewBox ? unionViewBox[1] / 1000 : null;
+  const boardW    = unionViewBox ? unionViewBox[2] / 1000 : null;
+  const boardH    = unionViewBox ? unionViewBox[3] / 1000 : null;
+  const has3d = boardXMin != null && boardYMin != null && boardW != null && boardH != null;
 
   return (
     <div className="flex flex-col h-full">
@@ -135,7 +138,12 @@ export function GerberPreview({ layers, onAddFiles }: Props) {
                 Loading 3D…
               </div>
             }>
-              <BoardViewport3D boardWidth={boardW!} boardHeight={boardH!} />
+              <BoardViewport3D
+                boardXMin={boardXMin!}
+                boardYMin={boardYMin!}
+                boardWidth={boardW!}
+                boardHeight={boardH!}
+              />
             </Suspense>
           </div>
         )}
