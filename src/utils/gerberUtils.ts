@@ -33,6 +33,9 @@ export function parseGerber(
       // color is a CSS property on the <svg> element; fills use currentColor
       attributes: { color },
       filetype,
+      // Default backup to mm — most modern PCBs are metric and older Excellon
+      // files often omit the METRIC/INCH header, which would otherwise default to 'in'
+      backupUnits: 'mm',
     });
 
     converter.on('data', (chunk) => {
@@ -40,7 +43,7 @@ export function parseGerber(
     });
 
     converter.on('end', () => {
-      resolve({
+      const result: ParseResult = {
         svgString: chunks.join(''),
         width: converter.width ?? null,
         height: converter.height ?? null,
@@ -48,7 +51,14 @@ export function parseGerber(
         viewBox: converter.viewBox ?? null,
         defsCount: converter.defs?.length ?? 0,
         layerCount: converter.layer?.length ?? 0,
-      });
+      };
+      // Debug: log each layer's parsed extent so unit mismatches are visible
+      console.debug(
+        `[gerber] ${filetype} parsed: units=${result.units} ` +
+        `viewBox=${JSON.stringify(result.viewBox)} ` +
+        `size=${result.width}×${result.height}`,
+      );
+      resolve(result);
     });
 
     converter.on('error', (err) => {
@@ -58,16 +68,19 @@ export function parseGerber(
 }
 
 /**
- * Computes the union bounding box across all provided viewBoxes.
- * All gerber-to-svg viewBoxes share the same board coordinate space, so
- * this gives a viewBox that fits every layer at once.
+ * Computes the union bounding box in mm-equivalent space.
+ * Inch-based layers are scaled ×25.4 so the result is always in mm×1000 units.
  */
 export function computeUnionViewBox(
   results: ParseResult[],
 ): [number, number, number, number] | null {
   const boxes = results
-    .map((r) => r.viewBox)
-    .filter((v): v is number[] => v != null && v.length === 4);
+    .filter((r) => r.viewBox != null && r.viewBox.length === 4)
+    .map((r) => {
+      const scale = r.units === 'in' ? 25.4 : 1;
+      const [x, y, w, h] = r.viewBox!;
+      return [x * scale, y * scale, w * scale, h * scale];
+    });
 
   if (boxes.length === 0) return null;
 
@@ -80,30 +93,60 @@ export function computeUnionViewBox(
 }
 
 /**
- * Overrides viewBox, width and height on the root <svg> so multiple layers
- * can be stacked in the same coordinate space.
+ * Builds a single composite SVG from multiple layers.
+ *
+ * Each layer is embedded as a nested <svg> with its NATURAL viewBox so the
+ * baked-in Y-flip transform (translate(0, viewBox[3]+2*viewBox[1]) scale(1,-1))
+ * stays correct. The outer SVG uses the union viewBox (always in mm×1000).
+ *
+ * Inch-based layers have their viewport (x/y/width/height) scaled ×25.4 so they
+ * map into the same mm coordinate space as the other layers.
  */
-export function prepareSvgWithViewBox(
-  svgString: string,
-  viewBox: [number, number, number, number],
+export function buildCompositeSvg(
+  layers: Array<Pick<LayerEntry, 'id' | 'result'>>,
+  unionViewBox: [number, number, number, number],
 ): string {
-  try {
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(svgString, 'image/svg+xml');
-    const svg = doc.documentElement;
-    if (svg.tagName.toLowerCase() === 'svg') {
-      svg.setAttribute('width', '100%');
-      svg.setAttribute('height', '100%');
-      svg.setAttribute('viewBox', viewBox.join(' '));
-      svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
-    }
-    return new XMLSerializer().serializeToString(doc);
-  } catch {
-    return svgString;
-  }
+  const [uvX, uvY, uvW, uvH] = unionViewBox;
+  const domParser = new DOMParser();
+
+  const nestedSvgs = layers.map(({ result }) => {
+    const naturalVb = result.viewBox ?? unionViewBox;
+    const [nvX, nvY, nvW, nvH] = naturalVb;
+
+    // Scale viewport to mm coordinate space if this layer was parsed in inches
+    const scale = result.units === 'in' ? 25.4 : 1;
+    const vx = nvX * scale;
+    const vy = nvY * scale;
+    const vw = nvW * scale;
+    const vh = nvH * scale;
+
+    // Extract the inner XML of the layer SVG (defs + layer group)
+    const doc = domParser.parseFromString(result.svgString, 'image/svg+xml');
+    const inner = Array.from(doc.documentElement.childNodes)
+      .map((n) => new XMLSerializer().serializeToString(n))
+      .join('');
+
+    return (
+      `<svg x="${vx}" y="${vy}" width="${vw}" height="${vh}" ` +
+      `viewBox="${nvX} ${nvY} ${nvW} ${nvH}" overflow="visible">` +
+      inner +
+      `</svg>`
+    );
+  });
+
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" ` +
+    `xmlns:xlink="http://www.w3.org/1999/xlink" ` +
+    `width="100%" height="100%" ` +
+    `viewBox="${uvX} ${uvY} ${uvW} ${uvH}" ` +
+    `preserveAspectRatio="xMidYMid meet" ` +
+    `stroke-linecap="round" stroke-linejoin="round" stroke-width="0" fill-rule="evenodd">` +
+    nestedSvgs.join('') +
+    `</svg>`
+  );
 }
 
-/** Falls back to the SVG's own viewBox when no union is available (single layer). */
+/** Single-layer display — just make the SVG fill its container. */
 export function prepareSvgForDisplay(svgString: string): string {
   try {
     const parser = new DOMParser();

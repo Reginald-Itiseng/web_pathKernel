@@ -1,7 +1,7 @@
 import React, { Suspense, lazy, useState, useCallback } from 'react';
 import {
   computeUnionViewBox,
-  prepareSvgWithViewBox,
+  buildCompositeSvg,
   prepareSvgForDisplay,
   type LayerEntry,
 } from '../utils/gerberUtils';
@@ -47,12 +47,14 @@ export function GerberPreview({ layers, onAddFiles }: Props) {
 
   const unionViewBox = computeUnionViewBox(visibleLayers.map((l) => l.result));
 
-  const preparedLayers = visibleLayers.map((layer) => ({
-    id: layer.id,
-    html: unionViewBox
-      ? prepareSvgWithViewBox(layer.result.svgString, unionViewBox)
-      : prepareSvgForDisplay(layer.result.svgString),
-  }));
+  // Build one composite SVG so each layer keeps its natural viewBox and
+  // Y-flip transform. Unit-mismatched layers (e.g. drill in inches) are
+  // mapped to mm space via their nested-SVG viewport.
+  const compositeSvg = unionViewBox
+    ? buildCompositeSvg(visibleLayers, unionViewBox)
+    : visibleLayers.length === 1
+      ? prepareSvgForDisplay(visibleLayers[0].result.svgString)
+      : null;
 
   const firstUnits = layers.find((l) => l.result.units)?.result.units ?? 'mm';
   const boardW = unionViewBox ? (unionViewBox[2] / 1000) : null;
@@ -88,25 +90,18 @@ export function GerberPreview({ layers, onAddFiles }: Props) {
           </div>
         )}
 
-        {/* 2D composite */}
+        {/* 2D composite — single SVG with nested layers, each keeping its own viewBox */}
         {tab === '2d' && (
           <>
             <div
-              className="absolute inset-0 p-4"
+              className="absolute inset-0 p-4 gerber-svg-wrapper"
               style={{
                 transform: `scale(${zoom})`,
                 transformOrigin: 'center center',
                 transition: 'transform 0.12s ease',
               }}
-            >
-              {preparedLayers.map((layer) => (
-                <div
-                  key={layer.id}
-                  className="absolute inset-0 gerber-svg-wrapper"
-                  dangerouslySetInnerHTML={{ __html: layer.html }}
-                />
-              ))}
-            </div>
+              dangerouslySetInnerHTML={{ __html: compositeSvg ?? '' }}
+            />
 
             {/* Zoom controls */}
             <div className="absolute bottom-3 right-3 flex items-center gap-1 bg-zinc-900/90 border border-zinc-700 rounded-lg p-1 backdrop-blur-sm">
