@@ -1,12 +1,8 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback } from 'react';
 import { GerberDropzone } from './components/GerberDropzone';
 import { GerberPreview } from './components/GerberPreview';
 import { LayerInfo } from './components/LayerInfo';
-import {
-  parseGerber,
-  type LayerEntry,
-  type DrillFormatOptions,
-} from './utils/gerberUtils';
+import { parseGerber, type LayerEntry } from './utils/gerberUtils';
 import { LAYER_COLORS, detectLayerType } from './utils/layerUtils';
 
 interface ParseError {
@@ -17,24 +13,13 @@ interface ParseError {
 interface AppState {
   layers: LayerEntry[];
   parsing: boolean;
-  /** IDs of drill layers currently being re-parsed. */
-  reparsing: Set<string>;
   errors: ParseError[];
 }
 
-const INITIAL: AppState = {
-  layers: [],
-  parsing: false,
-  reparsing: new Set(),
-  errors: [],
-};
+const INITIAL: AppState = { layers: [], parsing: false, errors: [] };
 
 export default function App() {
   const [state, setState] = useState<AppState>(INITIAL);
-
-  // Always-current reference to layers so reparseLayer never closes over stale state.
-  const layersRef = useRef<LayerEntry[]>(state.layers);
-  layersRef.current = state.layers;
 
   const handleFiles = useCallback(async (files: File[]) => {
     setState((s) => ({ ...s, parsing: true }));
@@ -47,17 +32,8 @@ export default function App() {
         const content   = await readFileAsText(file);
         const layerType = detectLayerType(file.name);
         const color     = LAYER_COLORS[layerType];
-        const isDrill   = layerType === 'drill';
-        const result    = await parseGerber(content, color, isDrill ? 'drill' : 'gerber');
-        newLayers.push({
-          id: crypto.randomUUID(),
-          file,
-          result,
-          layerType,
-          color,
-          visible: true,
-          drillFormat: isDrill ? {} : undefined,
-        });
+        const result    = await parseGerber(content, color, layerType === 'drill' ? 'drill' : 'gerber');
+        newLayers.push({ id: crypto.randomUUID(), file, result, layerType, color, visible: true });
       } catch (err) {
         newErrors.push({
           filename: file.name,
@@ -74,56 +50,14 @@ export default function App() {
     }));
   }, []);
 
-  /**
-   * Re-parse a drill layer with explicit format overrides.
-   * Uses layersRef so it never reads stale state from a closure.
-   */
-  const reparseLayer = useCallback(async (id: string, format: DrillFormatOptions) => {
-    // Read from ref — always current, no stale-closure risk
-    const layer = layersRef.current.find((l) => l.id === id);
-    if (!layer || layer.layerType !== 'drill') {
-      console.error('[reparseLayer] layer not found or not a drill layer:', id);
-      return;
-    }
-
-    setState((s) => ({
-      ...s,
-      reparsing: new Set([...s.reparsing, id]),
-    }));
-
-    try {
-      const content = await readFileAsText(layer.file);
-      const result  = await parseGerber(content, layer.color, 'drill', format);
-      setState((s) => ({
-        ...s,
-        reparsing: new Set([...s.reparsing].filter((x) => x !== id)),
-        layers: s.layers.map((l) =>
-          l.id === id ? { ...l, result, drillFormat: format } : l,
-        ),
-      }));
-    } catch (err) {
-      setState((s) => ({
-        ...s,
-        reparsing: new Set([...s.reparsing].filter((x) => x !== id)),
-        errors: [
-          ...s.errors,
-          {
-            filename: layer.file.name,
-            message: err instanceof Error ? err.message : 'Re-parse failed',
-          },
-        ],
-      }));
-    }
-  }, []); // stable — reads layers through ref, writes through functional setState
-
-  const toggleLayer  = useCallback((id: string) => {
+  const toggleLayer = useCallback((id: string) => {
     setState((s) => ({
       ...s,
       layers: s.layers.map((l) => l.id === id ? { ...l, visible: !l.visible } : l),
     }));
   }, []);
 
-  const removeLayer  = useCallback((id: string) => {
+  const removeLayer = useCallback((id: string) => {
     setState((s) => ({ ...s, layers: s.layers.filter((l) => l.id !== id) }));
   }, []);
 
@@ -133,7 +67,7 @@ export default function App() {
 
   const clearAll = useCallback(() => setState(INITIAL), []);
 
-  const { layers, parsing, reparsing, errors } = state;
+  const { layers, parsing, errors } = state;
   const hasLayers = layers.length > 0 || parsing || errors.length > 0;
 
   return (
@@ -154,14 +88,12 @@ export default function App() {
             <LayerInfo
               layers={layers}
               parsing={parsing}
-              reparsing={reparsing}
               errors={errors}
               onToggle={toggleLayer}
               onRemove={removeLayer}
               onAddFiles={handleFiles}
               onDismissError={dismissError}
               onClearAll={clearAll}
-              onReparseLayer={reparseLayer}
             />
           </div>
         )}

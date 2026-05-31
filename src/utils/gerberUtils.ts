@@ -11,23 +11,6 @@ export interface ParseResult {
   layerCount: number;
 }
 
-/**
- * Explicit format overrides for Excellon drill files.
- * Every field is optional — leave it undefined to let the parser
- * auto-detect from the file header.
- *
- * zero    — which zeros are suppressed in the coordinate field:
- *           'L' = leading zeros omitted (field is right-justified)
- *           'T' = trailing zeros omitted (field is left-justified)
- * places  — [digits before decimal, digits after decimal], e.g. [2,4]
- * units   — force 'mm' or 'in', overrides the METRIC/INCH header
- */
-export interface DrillFormatOptions {
-  zero?: 'L' | 'T';
-  places?: [number, number];
-  units?: 'mm' | 'in';
-}
-
 export interface LayerEntry {
   id: string;
   file: File;
@@ -35,15 +18,12 @@ export interface LayerEntry {
   layerType: LayerType;
   color: string;
   visible: boolean;
-  /** Populated (possibly empty {}) for every drill layer; undefined for Gerber layers. */
-  drillFormat?: DrillFormatOptions;
 }
 
 export function parseGerber(
   content: string,
   color: string,
   filetype: 'gerber' | 'drill' = 'gerber',
-  drillFormat: DrillFormatOptions = {},
 ): Promise<ParseResult> {
   return new Promise((resolve, reject) => {
     const chunks: string[] = [];
@@ -52,13 +32,9 @@ export function parseGerber(
       id: `board-${Math.random().toString(36).slice(2, 8)}`,
       attributes: { color },
       filetype,
-      // Backup to mm so files without a unit header default to metric.
+      // Default backup to mm — most modern PCBs are metric and older Excellon
+      // files often omit the METRIC/INCH header, which would otherwise default to 'in'
       backupUnits: 'mm',
-      // Only pass overrides that the user explicitly set — leave the rest
-      // to the parser's own auto-detection so we don't mask valid headers.
-      ...(drillFormat.zero   !== undefined && { zero:   drillFormat.zero }),
-      ...(drillFormat.places !== undefined && { places: drillFormat.places }),
-      ...(drillFormat.units  !== undefined && { units:  drillFormat.units }),
     });
 
     converter.on('data', (chunk) => chunks.push(String(chunk)));
@@ -66,12 +42,12 @@ export function parseGerber(
     converter.on('end', () => {
       const result: ParseResult = {
         svgString: chunks.join(''),
-        width:      converter.width  ?? null,
-        height:     converter.height ?? null,
-        units:      converter.units  || null,
-        viewBox:    converter.viewBox ?? null,
-        defsCount:  converter.defs?.length   ?? 0,
-        layerCount: converter.layer?.length  ?? 0,
+        width:     converter.width  ?? null,
+        height:    converter.height ?? null,
+        units:     converter.units  || null,
+        viewBox:   converter.viewBox ?? null,
+        defsCount: converter.defs?.length  ?? 0,
+        layerCount: converter.layer?.length ?? 0,
       };
       console.debug(
         `[gerber] ${filetype} parsed: units=${result.units} ` +
@@ -93,9 +69,9 @@ export function parseGerber(
  * units the parser reported.
  *
  * Layers with a severely different scale (>10× the median) are excluded
- * from the union and flagged — this catches drill files whose coordinate
- * format was guessed wrong (e.g. off by 25.4× or 10×) so that a bad
- * drill layer doesn't blow out the union and break all other layers.
+ * from the union — this catches drill files whose coordinate format was
+ * guessed wrong so that one bad layer doesn't blow out the union and
+ * break all other layers.
  */
 export function computeUnionViewBox(
   results: ParseResult[],
@@ -103,18 +79,16 @@ export function computeUnionViewBox(
   const valid = results.filter((r) => r.viewBox != null && r.viewBox.length === 4);
   if (valid.length === 0) return null;
 
-  // Normalise to mm×1000
   const normalised = valid.map((r) => {
     const s = r.units === 'in' ? 25.4 : 1;
     const [x, y, w, h] = r.viewBox!;
     return { x: x * s, y: y * s, w: w * s, h: h * s, diag: Math.sqrt(w * w + h * h) * s };
   });
 
-  // Exclude outlier layers whose diagonal is >10× off the median
   const diags   = [...normalised].map((b) => b.diag).sort((a, b) => a - b);
   const median  = diags[Math.floor(diags.length / 2)];
   const inBound = normalised.filter((b) => b.diag > median / 10 && b.diag < median * 10);
-  const boxes   = inBound.length > 0 ? inBound : normalised; // fall back to all if every layer is an outlier
+  const boxes   = inBound.length > 0 ? inBound : normalised;
 
   const xMin = Math.min(...boxes.map((b) => b.x));
   const yMin = Math.min(...boxes.map((b) => b.y));
@@ -140,21 +114,26 @@ export function buildCompositeSvg(
   unionViewBox: [number, number, number, number],
 ): string {
   const [uvX, uvY, uvW, uvH] = unionViewBox;
-  const domParser = new DOMParser();
+  const domParser  = new DOMParser();
+  const serializer = new XMLSerializer();
+  const unionYTranslate = uvH + 2 * uvY;
 
   const nestedSvgs = layers.map(({ result, color }) => {
     const naturalVb = result.viewBox ?? unionViewBox;
     const [nvX, nvY, nvW, nvH] = naturalVb;
 
     const scale = result.units === 'in' ? 25.4 : 1;
+    const layerYTranslate = unionYTranslate / scale;
     const vx = nvX * scale;
     const vy = nvY * scale;
     const vw = nvW * scale;
     const vh = nvH * scale;
 
-    const doc   = domParser.parseFromString(result.svgString, 'image/svg+xml');
+    const doc = domParser.parseFromString(result.svgString, 'image/svg+xml');
+    normaliseLayerYFlip(doc, layerYTranslate);
+
     const inner = Array.from(doc.documentElement.childNodes)
-      .map((n) => new XMLSerializer().serializeToString(n))
+      .map((n) => serializer.serializeToString(n))
       .join('');
 
     return (
@@ -165,9 +144,8 @@ export function buildCompositeSvg(
     );
   });
 
-  // Origin marker — Gerber (0,0) is at SVG y = uvH + 2·uvY because every layer
-  // bakes in:  yTranslate = vbH + 2·vbY  (render.js line 39)
-  const y0  = uvH + 2 * uvY;
+  // Origin marker — Gerber (0,0) sits at SVG y = uvH + 2·uvY
+  const y0  = unionYTranslate;
   const arm = Math.max(uvW, uvH) * 0.05;
   const sw  = Math.max(arm * 0.08, 50);
   const dot = arm * 0.12;
@@ -192,6 +170,25 @@ export function buildCompositeSvg(
     originMarker +
     `</svg>`
   );
+}
+
+/** Align each layer's baked Y-flip to the composite board-space viewBox. */
+function normaliseLayerYFlip(doc: Document, yTranslate: number): void {
+  const groups = Array.from(doc.documentElement.getElementsByTagName('g'));
+  const yFlipPattern = /translate\(\s*0\s*,\s*[-+0-9.eE]+\s*\)\s*scale\(\s*1\s*,\s*-1\s*\)/;
+  const yFlip = `translate(0,${formatSvgNumber(yTranslate)}) scale(1,-1)`;
+
+  const flippedGroup = groups.find((g) => yFlipPattern.test(g.getAttribute('transform') ?? ''));
+  if (!flippedGroup) return;
+
+  flippedGroup.setAttribute(
+    'transform',
+    (flippedGroup.getAttribute('transform') ?? '').replace(yFlipPattern, yFlip),
+  );
+}
+
+function formatSvgNumber(value: number): string {
+  return Number.isInteger(value) ? String(value) : value.toFixed(6).replace(/\.?0+$/, '');
 }
 
 /** Single-layer display — make the SVG fill its container. */
