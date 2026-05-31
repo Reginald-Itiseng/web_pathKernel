@@ -24,8 +24,10 @@ body,
   background-size: var(--grid-size) var(--grid-size);
 }
 
-/* Gerber SVG fills its wrapper */
-.gerber-svg-wrapper svg {
+/* Only the outermost composite SVG fills the wrapper.
+   Nested layer SVGs must keep their explicit x/y/width/height
+   attributes for coordinate-space mapping to work correctly. */
+.gerber-svg-wrapper > svg {
   width: 100%;
   height: 100%;
   display: block;
