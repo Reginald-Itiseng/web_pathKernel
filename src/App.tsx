@@ -32,7 +32,8 @@ export default function App() {
         const content = await readFileAsText(file);
         const layerType = detectLayerType(file.name);
         const color = LAYER_COLORS[layerType];
-        const result = await parseGerber(content, color);
+        const filetype = layerType === 'drill' ? 'drill' : 'gerber';
+        const result = await parseGerber(content, color, filetype);
         newLayers.push({
           id: crypto.randomUUID(),
           file,

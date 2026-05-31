@@ -20,7 +20,11 @@ export interface LayerEntry {
   visible: boolean;
 }
 
-export function parseGerber(content: string, color: string): Promise<ParseResult> {
+export function parseGerber(
+  content: string,
+  color: string,
+  filetype: 'gerber' | 'drill' = 'gerber',
+): Promise<ParseResult> {
   return new Promise((resolve, reject) => {
     const chunks: string[] = [];
 
@@ -28,6 +32,7 @@ export function parseGerber(content: string, color: string): Promise<ParseResult
       id: `board-${Math.random().toString(36).slice(2, 8)}`,
       // color is a CSS property on the <svg> element; fills use currentColor
       attributes: { color },
+      filetype,
     });
 
     converter.on('data', (chunk) => {
