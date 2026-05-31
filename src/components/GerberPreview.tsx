@@ -6,6 +6,8 @@ import {
   type LayerEntry,
 } from '../utils/gerberUtils';
 import { LAYER_Z_ORDER } from '../utils/layerUtils';
+import { SelectionPopup, type ElementSelection } from './SelectionPopup';
+import type { PadHoleMatch } from '../types/geometry';
 
 const BoardViewport3D = lazy(() =>
   import('./BoardViewport3D').then((m) => ({ default: m.BoardViewport3D })),
@@ -14,6 +16,10 @@ const BoardViewport3D = lazy(() =>
 interface Props {
   layers: LayerEntry[];
   onAddFiles: (files: File[]) => void;
+  padHoleMatches: PadHoleMatch[];
+  onPadSizeChange:      (layerId: string, defId: string, newDiameterMm: number) => void;
+  onTraceWidthChange:   (layerId: string, oldRaw: number, newWidthMm: number) => void;
+  onHoleDiameterChange: (layerId: string, defId: string, newDiameterMm: number) => void;
 }
 
 type Tab = '2d' | '3d';
@@ -22,12 +28,16 @@ const MIN_ZOOM = 0.15;
 const MAX_ZOOM = 8;
 const ZOOM_STEP = 1.25;
 
-export function GerberPreview({ layers, onAddFiles }: Props) {
+export function GerberPreview({
+  layers, onAddFiles,
+  padHoleMatches, onPadSizeChange, onTraceWidthChange, onHoleDiameterChange,
+}: Props) {
   const [tab, setTab] = useState<Tab>('2d');
   const [zoom, setZoom] = useState(1);
   const [dropOver, setDropOver] = useState(false);
+  const [selection, setSelection] = useState<ElementSelection | null>(null);
 
-  const zoomIn = () => setZoom((z) => Math.min(z * ZOOM_STEP, MAX_ZOOM));
+  const zoomIn  = () => setZoom((z) => Math.min(z * ZOOM_STEP, MAX_ZOOM));
   const zoomOut = () => setZoom((z) => Math.max(z / ZOOM_STEP, MIN_ZOOM));
   const fitScreen = () => setZoom(1);
 
@@ -41,15 +51,67 @@ export function GerberPreview({ layers, onAddFiles }: Props) {
     [onAddFiles],
   );
 
+  // ── Element picking on SVG click ──────────────────────────────────────────
+  const handleCompositeClick = useCallback((e: React.MouseEvent) => {
+    const target = e.target as Element;
+
+    // Which nested layer SVG was clicked?
+    const layerSvg = target.closest('[data-layer-id]');
+    const layerId  = layerSvg?.getAttribute('data-layer-id');
+    if (!layerId) { setSelection(null); return; }
+
+    const layer = layers.find((l) => l.id === layerId);
+    if (!layer?.geometry) { setSelection(null); return; }
+
+    // ── Pad / drill hole: look for <use xlink:href="#...">
+    const useEl =
+      target.tagName.toLowerCase() === 'use'
+        ? target
+        : (target.closest('use') as Element | null);
+
+    if (useEl) {
+      const href = useEl.getAttribute('xlink:href') ?? useEl.getAttribute('href') ?? '';
+      if (href.includes('_pad-')) {
+        const defId = href.startsWith('#') ? href.slice(1) : href;
+        const knownDef = layer.geometry.padDefs.find((d) => d.defId === defId);
+        if (knownDef) {
+          setSelection({ type: 'pad', layerId, defId, strokeWidthRaw: 0, clientX: e.clientX, clientY: e.clientY });
+          return;
+        }
+      }
+    }
+
+    // ── Trace: <path fill="none" stroke-width="...">
+    const pathEl =
+      target.tagName.toLowerCase() === 'path'
+        ? target
+        : (target.closest('path') as Element | null);
+
+    if (pathEl) {
+      const sw   = pathEl.getAttribute('stroke-width');
+      const fill = pathEl.getAttribute('fill');
+      if (sw && fill === 'none') {
+        const raw = parseFloat(sw);
+        const known = layer.geometry.traceClasses.find((t) => t.strokeWidthRaw === raw);
+        if (known) {
+          setSelection({ type: 'trace', layerId, defId: '', strokeWidthRaw: raw, clientX: e.clientX, clientY: e.clientY });
+          return;
+        }
+      }
+    }
+
+    // Click on background — dismiss
+    setSelection(null);
+  }, [layers]);
+
+  // ─────────────────────────────────────────────────────────────────────────
+
   const visibleLayers = [...layers]
     .filter((l) => l.visible)
     .sort((a, b) => LAYER_Z_ORDER[a.layerType] - LAYER_Z_ORDER[b.layerType]);
 
   const unionViewBox = computeUnionViewBox(visibleLayers.map((l) => l.result));
 
-  // Build one composite SVG so each layer keeps its natural viewBox and
-  // Y-flip transform. Unit-mismatched layers (e.g. drill in inches) are
-  // mapped to mm space via their nested-SVG viewport.
   const compositeSvg = unionViewBox
     ? buildCompositeSvg(visibleLayers, unionViewBox)
     : visibleLayers.length === 1
@@ -57,11 +119,10 @@ export function GerberPreview({ layers, onAddFiles }: Props) {
       : null;
 
   const firstUnits = layers.find((l) => l.result.units)?.result.units ?? 'mm';
-  // All four values in mm (viewBox units are ×1000)
-  const boardXMin = unionViewBox ? unionViewBox[0] / 1000 : null;
-  const boardYMin = unionViewBox ? unionViewBox[1] / 1000 : null;
-  const boardW    = unionViewBox ? unionViewBox[2] / 1000 : null;
-  const boardH    = unionViewBox ? unionViewBox[3] / 1000 : null;
+  const boardXMin  = unionViewBox ? unionViewBox[0] / 1000 : null;
+  const boardYMin  = unionViewBox ? unionViewBox[1] / 1000 : null;
+  const boardW     = unionViewBox ? unionViewBox[2] / 1000 : null;
+  const boardH     = unionViewBox ? unionViewBox[3] / 1000 : null;
   const has3d = boardXMin != null && boardYMin != null && boardW != null && boardH != null;
 
   return (
@@ -86,46 +147,46 @@ export function GerberPreview({ layers, onAddFiles }: Props) {
         onDragLeave={() => setDropOver(false)}
         onDrop={handleDrop}
       >
-        {/* Drop-to-add overlay */}
         {dropOver && (
           <div className="absolute inset-0 z-20 flex items-center justify-center rounded-xl border-2 border-green-400 bg-green-400/10 pointer-events-none">
             <p className="text-green-300 font-semibold text-lg">Drop to add layer</p>
           </div>
         )}
 
-        {/* 2D composite — single SVG with nested layers, each keeping its own viewBox */}
+        {/* 2D composite */}
         {tab === '2d' && (
           <>
             <div
-              className="absolute inset-0 p-4 gerber-svg-wrapper"
+              className="absolute inset-0 p-4 gerber-svg-wrapper pcb-interactive"
               style={{
                 transform: `scale(${zoom})`,
                 transformOrigin: 'center center',
                 transition: 'transform 0.12s ease',
               }}
               dangerouslySetInnerHTML={{ __html: compositeSvg ?? '' }}
+              onClick={handleCompositeClick}
             />
 
             {/* Zoom controls */}
             <div className="absolute bottom-3 right-3 flex items-center gap-1 bg-zinc-900/90 border border-zinc-700 rounded-lg p-1 backdrop-blur-sm">
-              <ZoomButton onClick={zoomOut} title="Zoom out" disabled={zoom <= MIN_ZOOM}>
-                <MinusIcon />
-              </ZoomButton>
+              <ZoomButton onClick={zoomOut} title="Zoom out" disabled={zoom <= MIN_ZOOM}><MinusIcon /></ZoomButton>
               <button
                 onClick={fitScreen}
-                title="Fit to screen"
                 className="px-2 py-1 text-xs font-mono text-zinc-300 hover:text-zinc-100 hover:bg-zinc-700 rounded transition-colors min-w-[3.5rem] text-center"
               >
                 {Math.round(zoom * 100)}%
               </button>
-              <ZoomButton onClick={zoomIn} title="Zoom in" disabled={zoom >= MAX_ZOOM}>
-                <PlusIcon />
-              </ZoomButton>
+              <ZoomButton onClick={zoomIn} title="Zoom in" disabled={zoom >= MAX_ZOOM}><PlusIcon /></ZoomButton>
               <div className="w-px h-4 bg-zinc-700 mx-0.5" />
-              <ZoomButton onClick={fitScreen} title="Fit to screen">
-                <FitIcon />
-              </ZoomButton>
+              <ZoomButton onClick={fitScreen} title="Fit to screen"><FitIcon /></ZoomButton>
             </div>
+
+            {/* Hint */}
+            {!dropOver && !selection && (
+              <div className="absolute bottom-3 left-3 text-xs text-zinc-600 pointer-events-none">
+                Click a pad or trace to edit · Drag files to add layers
+              </div>
+            )}
           </>
         )}
 
@@ -139,25 +200,15 @@ export function GerberPreview({ layers, onAddFiles }: Props) {
               </div>
             }>
               <BoardViewport3D
-                boardXMin={boardXMin!}
-                boardYMin={boardYMin!}
-                boardWidth={boardW!}
-                boardHeight={boardH!}
+                boardXMin={boardXMin!} boardYMin={boardYMin!}
+                boardWidth={boardW!}   boardHeight={boardH!}
               />
             </Suspense>
           </div>
         )}
-
         {tab === '3d' && (
           <div className="absolute bottom-3 left-3 text-xs text-zinc-500 bg-zinc-900/80 rounded px-2 py-1 pointer-events-none">
             Orbit · Scroll to zoom · Right-drag to pan
-          </div>
-        )}
-
-        {/* Drag-to-add hint */}
-        {tab === '2d' && !dropOver && (
-          <div className="absolute bottom-3 left-3 text-xs text-zinc-600 pointer-events-none">
-            Drag more files here to add layers
           </div>
         )}
       </div>
@@ -170,58 +221,47 @@ export function GerberPreview({ layers, onAddFiles }: Props) {
           </span>
         </div>
       )}
+
+      {/* Selection popup (portal-free: fixed positioned) */}
+      {selection && (
+        <SelectionPopup
+          selection={selection}
+          layers={layers}
+          padHoleMatches={padHoleMatches}
+          onPadSizeChange={onPadSizeChange}
+          onTraceWidthChange={onTraceWidthChange}
+          onHoleDiameterChange={onHoleDiameterChange}
+          onClose={() => setSelection(null)}
+        />
+      )}
     </div>
   );
 }
 
-function TabButton({
-  active, onClick, disabled, children,
-}: {
-  active: boolean;
-  onClick: () => void;
-  disabled?: boolean;
-  children: React.ReactNode;
+// ─── Small components ─────────────────────────────────────────────────────────
+
+function TabButton({ active, onClick, disabled, children }: {
+  active: boolean; onClick: () => void; disabled?: boolean; children: React.ReactNode;
 }) {
   return (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      className={[
-        'px-4 py-1.5 text-sm rounded-lg transition-colors disabled:cursor-not-allowed',
-        active
-          ? 'bg-zinc-700 text-zinc-100'
-          : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 disabled:opacity-40',
-      ].join(' ')}
-    >
+    <button onClick={onClick} disabled={disabled}
+      className={['px-4 py-1.5 text-sm rounded-lg transition-colors disabled:cursor-not-allowed',
+        active ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 disabled:opacity-40',
+      ].join(' ')}>
       {children}
     </button>
   );
 }
-
 function ZoomButton({ onClick, title, disabled, children }: {
-  onClick: () => void;
-  title: string;
-  disabled?: boolean;
-  children: React.ReactNode;
+  onClick: () => void; title: string; disabled?: boolean; children: React.ReactNode;
 }) {
   return (
-    <button
-      onClick={onClick}
-      title={title}
-      disabled={disabled}
-      className="p-1.5 rounded text-zinc-300 hover:text-zinc-100 hover:bg-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-    >
+    <button onClick={onClick} title={title} disabled={disabled}
+      className="p-1.5 rounded text-zinc-300 hover:text-zinc-100 hover:bg-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed transition-colors">
       {children}
     </button>
   );
 }
-
-function PlusIcon() {
-  return <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M8 3v10M3 8h10" /></svg>;
-}
-function MinusIcon() {
-  return <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M3 8h10" /></svg>;
-}
-function FitIcon() {
-  return <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M1 5V2h3M12 2h3v3M15 11v3h-3M4 14H1v-3" /></svg>;
-}
+function PlusIcon()  { return <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M8 3v10M3 8h10"/></svg>; }
+function MinusIcon() { return <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M3 8h10"/></svg>; }
+function FitIcon()   { return <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M1 5V2h3M12 2h3v3M15 11v3h-3M4 14H1v-3"/></svg>; }

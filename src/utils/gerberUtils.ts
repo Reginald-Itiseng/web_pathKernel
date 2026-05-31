@@ -121,7 +121,7 @@ export function buildCompositeSvg(
   const serializer = new XMLSerializer();
   const unionYTranslate = uvH + 2 * uvY;
 
-  const nestedSvgs = layers.map(({ result, color }) => {
+  const nestedSvgs = layers.map(({ id, result, color }) => {
     const naturalVb = result.viewBox ?? unionViewBox;
     const [nvX, nvY, nvW, nvH] = naturalVb;
 
@@ -141,7 +141,7 @@ export function buildCompositeSvg(
 
     return (
       `<svg x="${vx}" y="${vy}" width="${vw}" height="${vh}" ` +
-      `viewBox="${nvX} ${nvY} ${nvW} ${nvH}" overflow="visible" color="${color}">` +
+      `viewBox="${nvX} ${nvY} ${nvW} ${nvH}" overflow="visible" color="${color}" data-layer-id="${id}">` +
       inner +
       `</svg>`
     );

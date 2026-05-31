@@ -164,7 +164,14 @@ export default function App() {
 
         <main className="flex-1 p-4 overflow-hidden">
           {hasLayers ? (
-            <GerberPreview layers={layers} onAddFiles={handleFiles} />
+            <GerberPreview
+              layers={layers}
+              onAddFiles={handleFiles}
+              padHoleMatches={padHoleMatches}
+              onPadSizeChange={updatePadSize}
+              onTraceWidthChange={updateTraceWidth}
+              onHoleDiameterChange={updateHoleDiameter}
+            />
           ) : (
             <GerberDropzone onFiles={handleFiles} />
           )}

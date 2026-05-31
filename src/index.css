@@ -24,6 +24,12 @@ body,
   background-size: var(--grid-size) var(--grid-size);
 }
 
+/* Interactive SVG elements show a pointer cursor */
+.pcb-interactive use,
+.pcb-interactive path[fill="none"] {
+  cursor: pointer;
+}
+
 /* Only the outermost composite SVG fills the wrapper.
    Nested layer SVGs must keep their explicit x/y/width/height
    attributes for coordinate-space mapping to work correctly. */
