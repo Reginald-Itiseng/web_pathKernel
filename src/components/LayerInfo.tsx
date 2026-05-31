@@ -1,9 +1,39 @@
-import React, { useRef } from 'react';
-import type { LayerEntry } from '../utils/gerberUtils';
+import React, { useRef, useState } from 'react';
+import type { LayerEntry, DrillFormatOptions } from '../utils/gerberUtils';
 import { LAYER_LABELS, LAYER_COLORS } from '../utils/layerUtils';
 import { computeUnionViewBox } from '../utils/gerberUtils';
 
 const ACCEPTED = '.gbr,.gtl,.gbl,.gts,.gbs,.ger,.art,.gto,.gbo,.gko,.drl';
+
+// ─── Drill format presets ────────────────────────────────────────────────────
+
+const ZERO_OPTIONS = [
+  { value: '',  label: 'Auto-detect' },
+  { value: 'L', label: 'L — leading zeros omitted' },
+  { value: 'T', label: 'T — trailing zeros omitted' },
+] as const;
+
+const PLACES_OPTIONS = [
+  { value: '',    label: 'Auto-detect', places: undefined },
+  { value: '2:4', label: '2:4  (0.0001 mm)',  places: [2, 4] as [number, number] },
+  { value: '2:5', label: '2:5  (0.00001 mm)', places: [2, 5] as [number, number] },
+  { value: '2:6', label: '2:6  (0.000001 mm)', places: [2, 6] as [number, number] },
+  { value: '3:3', label: '3:3  (0.001 mm)',   places: [3, 3] as [number, number] },
+  { value: '3:4', label: '3:4  (0.0001 mm)',  places: [3, 4] as [number, number] },
+  { value: '4:2', label: '4:2  (0.01 mm)',    places: [4, 2] as [number, number] },
+] as const;
+
+const UNITS_OPTIONS = [
+  { value: '',   label: 'Auto-detect' },
+  { value: 'mm', label: 'mm  (metric)' },
+  { value: 'in', label: 'in  (imperial)' },
+] as const;
+
+function placesToKey(p?: [number, number]): string {
+  return p ? `${p[0]}:${p[1]}` : '';
+}
+
+// ─── Props ───────────────────────────────────────────────────────────────────
 
 interface Props {
   layers: LayerEntry[];
@@ -14,17 +44,14 @@ interface Props {
   onAddFiles: (files: File[]) => void;
   onDismissError: (filename: string) => void;
   onClearAll: () => void;
+  onReparseLayer: (id: string, format: DrillFormatOptions) => void;
 }
 
+// ─── Root component ──────────────────────────────────────────────────────────
+
 export function LayerInfo({
-  layers,
-  parsing,
-  errors,
-  onToggle,
-  onRemove,
-  onAddFiles,
-  onDismissError,
-  onClearAll,
+  layers, parsing, errors,
+  onToggle, onRemove, onAddFiles, onDismissError, onClearAll, onReparseLayer,
 }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -35,34 +62,23 @@ export function LayerInfo({
   };
 
   const unionViewBox = computeUnionViewBox(layers.map((l) => l.result));
-  const firstUnits = layers.find((l) => l.result.units)?.result.units ?? 'mm';
+  const firstUnits   = layers.find((l) => l.result.units)?.result.units ?? 'mm';
   const boardW = unionViewBox ? (unionViewBox[2] / 1000).toFixed(2) : null;
   const boardH = unionViewBox ? (unionViewBox[3] / 1000).toFixed(2) : null;
 
   return (
     <aside className="flex flex-col gap-3 h-full">
-      <h2 className="text-xs font-semibold uppercase tracking-widest text-zinc-500">
-        Layers
-      </h2>
+      <h2 className="text-xs font-semibold uppercase tracking-widest text-zinc-500">Layers</h2>
 
       {/* Error toasts */}
       {errors.map((err) => (
-        <div
-          key={err.filename}
-          className="flex items-start gap-2 rounded-lg bg-red-950/50 border border-red-800 px-3 py-2 text-xs"
-        >
+        <div key={err.filename} className="flex items-start gap-2 rounded-lg bg-red-950/50 border border-red-800 px-3 py-2 text-xs">
           <span className="text-red-400 shrink-0 mt-0.5">!</span>
           <div className="flex-1 min-w-0">
             <p className="text-red-300 font-medium truncate">{err.filename}</p>
             <p className="text-red-400 truncate">{err.message}</p>
           </div>
-          <button
-            onClick={() => onDismissError(err.filename)}
-            className="text-red-500 hover:text-red-300 shrink-0"
-            aria-label="Dismiss"
-          >
-            ×
-          </button>
+          <button onClick={() => onDismissError(err.filename)} className="text-red-500 hover:text-red-300 shrink-0">×</button>
         </div>
       ))}
 
@@ -74,9 +90,9 @@ export function LayerInfo({
             layer={layer}
             onToggle={() => onToggle(layer.id)}
             onRemove={() => onRemove(layer.id)}
+            onReparse={(fmt) => onReparseLayer(layer.id, fmt)}
           />
         ))}
-
         {parsing && (
           <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-zinc-800/50 text-zinc-400 text-xs">
             <div className="w-3.5 h-3.5 rounded-full border border-zinc-500 border-t-transparent animate-spin shrink-0" />
@@ -90,32 +106,20 @@ export function LayerInfo({
         <div className="rounded-lg bg-zinc-900 border border-zinc-800 px-3 py-2">
           <p className="text-xs text-zinc-500 mb-1">Board size</p>
           <p className="text-xs font-mono text-zinc-200">
-            {boardW} × {boardH}{' '}
-            <span className="text-zinc-500">{firstUnits}</span>
+            {boardW} × {boardH} <span className="text-zinc-500">{firstUnits}</span>
           </p>
         </div>
       )}
 
       {/* Actions */}
       <div className="flex flex-col gap-2">
-        <input
-          ref={inputRef}
-          type="file"
-          accept={ACCEPTED}
-          multiple
-          className="hidden"
-          onChange={handleChange}
-        />
-        <button
-          onClick={() => inputRef.current?.click()}
-          className="w-full px-3 py-2 text-sm font-medium text-zinc-900 bg-green-400 hover:bg-green-300 rounded-lg transition-colors"
-        >
+        <input ref={inputRef} type="file" accept={ACCEPTED} multiple className="hidden" onChange={handleChange} />
+        <button onClick={() => inputRef.current?.click()}
+          className="w-full px-3 py-2 text-sm font-medium text-zinc-900 bg-green-400 hover:bg-green-300 rounded-lg transition-colors">
           + Add layer
         </button>
-        <button
-          onClick={onClearAll}
-          className="w-full px-3 py-2 text-sm text-zinc-400 hover:text-zinc-200 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded-lg transition-colors"
-        >
+        <button onClick={onClearAll}
+          className="w-full px-3 py-2 text-sm text-zinc-400 hover:text-zinc-200 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded-lg transition-colors">
           Clear all
         </button>
       </div>
@@ -123,68 +127,160 @@ export function LayerInfo({
   );
 }
 
-function LayerRow({
-  layer,
-  onToggle,
-  onRemove,
-}: {
+// ─── Layer row ───────────────────────────────────────────────────────────────
+
+function LayerRow({ layer, onToggle, onRemove, onReparse }: {
   layer: LayerEntry;
   onToggle: () => void;
   onRemove: () => void;
+  onReparse: (fmt: DrillFormatOptions) => void;
 }) {
-  const color = LAYER_COLORS[layer.layerType];
-  const label = LAYER_LABELS[layer.layerType];
-  const name = layer.file.name;
+  const [open, setOpen] = useState(false);
+  const isDrill = layer.layerType === 'drill';
+  const color   = LAYER_COLORS[layer.layerType];
+  const label   = LAYER_LABELS[layer.layerType];
 
   return (
-    <div
-      className={[
-        'flex items-center gap-2 rounded-lg px-2 py-1.5 group',
+    <div className="rounded-lg overflow-hidden">
+      {/* Header row */}
+      <div className={[
+        'flex items-center gap-2 px-2 py-1.5 group',
         layer.visible ? 'bg-zinc-800/60' : 'bg-zinc-900/40 opacity-50',
-      ].join(' ')}
-    >
-      {/* Color dot */}
-      <span
-        className="w-2.5 h-2.5 rounded-full shrink-0"
-        style={{ backgroundColor: layer.visible ? color : '#52525b' }}
-      />
+      ].join(' ')}>
+        <span className="w-2.5 h-2.5 rounded-full shrink-0"
+          style={{ backgroundColor: layer.visible ? color : '#52525b' }} />
 
-      {/* Name + type */}
-      <div className="flex-1 min-w-0">
-        <p className="text-xs text-zinc-200 truncate leading-tight">{name}</p>
-        <p className="text-xs text-zinc-500 leading-tight">{label}</p>
+        <div className="flex-1 min-w-0">
+          <p className="text-xs text-zinc-200 truncate leading-tight">{layer.file.name}</p>
+          <p className="text-xs text-zinc-500 leading-tight">{label}</p>
+        </div>
+
+        <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+          {isDrill && (
+            <button onClick={() => setOpen((o) => !o)} title="Drill format options"
+              className={[
+                'p-1 rounded transition-colors',
+                open
+                  ? 'text-green-400 bg-zinc-700'
+                  : 'text-zinc-400 hover:text-zinc-100 hover:bg-zinc-700',
+              ].join(' ')}>
+              <GearIcon />
+            </button>
+          )}
+          <button onClick={onToggle} title={layer.visible ? 'Hide' : 'Show'}
+            className="p-1 rounded text-zinc-400 hover:text-zinc-100 hover:bg-zinc-700 transition-colors">
+            {layer.visible ? <EyeIcon /> : <EyeOffIcon />}
+          </button>
+          <button onClick={onRemove} title="Remove"
+            className="p-1 rounded text-zinc-400 hover:text-red-400 hover:bg-zinc-700 transition-colors">
+            <XIcon />
+          </button>
+        </div>
       </div>
 
-      {/* Controls */}
-      <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-        <button
-          onClick={onToggle}
-          title={layer.visible ? 'Hide layer' : 'Show layer'}
-          className="p-1 rounded text-zinc-400 hover:text-zinc-100 hover:bg-zinc-700 transition-colors"
-        >
-          {layer.visible ? <EyeIcon /> : <EyeOffIcon />}
-        </button>
-        <button
-          onClick={onRemove}
-          title="Remove layer"
-          className="p-1 rounded text-zinc-400 hover:text-red-400 hover:bg-zinc-700 transition-colors"
-        >
-          <XIcon />
-        </button>
-      </div>
+      {/* Drill format panel */}
+      {isDrill && open && (
+        <DrillFormatPanel
+          committed={layer.drillFormat ?? {}}
+          onReparse={(fmt) => { onReparse(fmt); setOpen(false); }}
+        />
+      )}
     </div>
   );
 }
 
-function EyeIcon() {
+// ─── Drill format panel ──────────────────────────────────────────────────────
+
+function DrillFormatPanel({ committed, onReparse }: {
+  committed: DrillFormatOptions;
+  onReparse: (fmt: DrillFormatOptions) => void;
+}) {
+  const [fmt, setFmt] = useState<DrillFormatOptions>(committed);
+
+  const dirty =
+    fmt.zero   !== committed.zero   ||
+    fmt.units  !== committed.units  ||
+    placesToKey(fmt.places) !== placesToKey(committed.places);
+
+  function set<K extends keyof DrillFormatOptions>(key: K, raw: string) {
+    if (key === 'places') {
+      const preset = PLACES_OPTIONS.find((o) => o.value === raw);
+      setFmt((f) => ({ ...f, places: preset?.places }));
+    } else {
+      setFmt((f) => ({ ...f, [key]: raw || undefined }));
+    }
+  }
+
   return (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
-      <path d="M1 8s2.5-5 7-5 7 5 7 5-2.5 5-7 5-7-5-7-5Z" />
-      <circle cx="8" cy="8" r="2" />
-    </svg>
+    <div className="bg-zinc-900 border-t border-zinc-700 px-3 py-2.5 flex flex-col gap-2">
+      <p className="text-xs text-zinc-400 font-medium">Drill format overrides</p>
+
+      <label className="flex flex-col gap-0.5">
+        <span className="text-xs text-zinc-500">Zero suppression</span>
+        <select
+          value={fmt.zero ?? ''}
+          onChange={(e) => set('zero', e.target.value)}
+          className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-200 focus:outline-none focus:border-green-500"
+        >
+          {ZERO_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+        </select>
+      </label>
+
+      <label className="flex flex-col gap-0.5">
+        <span className="text-xs text-zinc-500">Decimal format</span>
+        <select
+          value={placesToKey(fmt.places)}
+          onChange={(e) => set('places', e.target.value)}
+          className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-200 focus:outline-none focus:border-green-500"
+        >
+          {PLACES_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+        </select>
+      </label>
+
+      <label className="flex flex-col gap-0.5">
+        <span className="text-xs text-zinc-500">Units</span>
+        <select
+          value={fmt.units ?? ''}
+          onChange={(e) => set('units', e.target.value)}
+          className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-200 focus:outline-none focus:border-green-500"
+        >
+          {UNITS_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+        </select>
+      </label>
+
+      <button
+        onClick={() => onReparse(fmt)}
+        disabled={!dirty}
+        className="w-full mt-0.5 py-1.5 text-xs font-medium rounded transition-colors
+          bg-green-500 hover:bg-green-400 text-zinc-900
+          disabled:opacity-30 disabled:cursor-not-allowed"
+      >
+        Re-parse
+      </button>
+      {dirty && (
+        <p className="text-xs text-amber-400 text-center">Unsaved changes</p>
+      )}
+    </div>
   );
 }
 
+// ─── Icons ───────────────────────────────────────────────────────────────────
+
+function GearIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+      <circle cx="8" cy="8" r="2.5" />
+      <path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.05 3.05l1.41 1.41M11.54 11.54l1.41 1.41M3.05 12.95l1.41-1.41M11.54 4.46l1.41-1.41" />
+    </svg>
+  );
+}
+function EyeIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+      <path d="M1 8s2.5-5 7-5 7 5 7 5-2.5 5-7 5-7-5-7-5Z" /><circle cx="8" cy="8" r="2" />
+    </svg>
+  );
+}
 function EyeOffIcon() {
   return (
     <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
@@ -193,7 +289,6 @@ function EyeOffIcon() {
     </svg>
   );
 }
-
 function XIcon() {
   return (
     <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">

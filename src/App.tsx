@@ -2,7 +2,11 @@ import { useState, useCallback } from 'react';
 import { GerberDropzone } from './components/GerberDropzone';
 import { GerberPreview } from './components/GerberPreview';
 import { LayerInfo } from './components/LayerInfo';
-import { parseGerber, type LayerEntry } from './utils/gerberUtils';
+import {
+  parseGerber,
+  type LayerEntry,
+  type DrillFormatOptions,
+} from './utils/gerberUtils';
 import { LAYER_COLORS, detectLayerType } from './utils/layerUtils';
 
 interface ParseError {
@@ -29,11 +33,11 @@ export default function App() {
 
     for (const file of files) {
       try {
-        const content = await readFileAsText(file);
+        const content   = await readFileAsText(file);
         const layerType = detectLayerType(file.name);
-        const color = LAYER_COLORS[layerType];
-        const filetype = layerType === 'drill' ? 'drill' : 'gerber';
-        const result = await parseGerber(content, color, filetype);
+        const color     = LAYER_COLORS[layerType];
+        const isDrill   = layerType === 'drill';
+        const result    = await parseGerber(content, color, isDrill ? 'drill' : 'gerber');
         newLayers.push({
           id: crypto.randomUUID(),
           file,
@@ -41,6 +45,7 @@ export default function App() {
           layerType,
           color,
           visible: true,
+          drillFormat: isDrill ? {} : undefined,
         });
       } catch (err) {
         newErrors.push({
@@ -57,24 +62,50 @@ export default function App() {
     }));
   }, []);
 
-  const toggleLayer = useCallback((id: string) => {
+  /** Re-parse a drill layer with explicit format overrides. */
+  const reparseLayer = useCallback(async (id: string, format: DrillFormatOptions) => {
+    const layer = state.layers.find((l) => l.id === id);
+    if (!layer || layer.layerType !== 'drill') return;
+
+    setState((s) => ({ ...s, parsing: true }));
+    try {
+      const content = await readFileAsText(layer.file);
+      const result  = await parseGerber(content, layer.color, 'drill', format);
+      setState((s) => ({
+        ...s,
+        parsing: false,
+        layers: s.layers.map((l) =>
+          l.id === id ? { ...l, result, drillFormat: format } : l,
+        ),
+      }));
+    } catch (err) {
+      setState((s) => ({
+        ...s,
+        parsing: false,
+        errors: [
+          ...s.errors,
+          {
+            filename: layer.file.name,
+            message: err instanceof Error ? err.message : 'Re-parse failed',
+          },
+        ],
+      }));
+    }
+  }, [state.layers]);
+
+  const toggleLayer  = useCallback((id: string) => {
     setState((s) => ({
       ...s,
-      layers: s.layers.map((l) =>
-        l.id === id ? { ...l, visible: !l.visible } : l,
-      ),
+      layers: s.layers.map((l) => l.id === id ? { ...l, visible: !l.visible } : l),
     }));
   }, []);
 
-  const removeLayer = useCallback((id: string) => {
+  const removeLayer  = useCallback((id: string) => {
     setState((s) => ({ ...s, layers: s.layers.filter((l) => l.id !== id) }));
   }, []);
 
   const dismissError = useCallback((filename: string) => {
-    setState((s) => ({
-      ...s,
-      errors: s.errors.filter((e) => e.filename !== filename),
-    }));
+    setState((s) => ({ ...s, errors: s.errors.filter((e) => e.filename !== filename) }));
   }, []);
 
   const clearAll = useCallback(() => setState(INITIAL), []);
@@ -84,7 +115,6 @@ export default function App() {
 
   return (
     <div className="h-full flex flex-col bg-zinc-950 text-zinc-200">
-      {/* Header */}
       <header className="shrink-0 flex items-center gap-3 px-5 h-12 border-b border-zinc-800 bg-zinc-900">
         <div className="flex items-center gap-2">
           <PcbIcon className="w-5 h-5 text-green-400" />
@@ -95,9 +125,7 @@ export default function App() {
         </span>
       </header>
 
-      {/* Body */}
       <div className="flex flex-1 overflow-hidden">
-        {/* Sidebar */}
         {hasLayers && (
           <div className="shrink-0 w-60 border-r border-zinc-800 bg-zinc-950 p-4 overflow-hidden flex flex-col">
             <LayerInfo
@@ -109,11 +137,11 @@ export default function App() {
               onAddFiles={handleFiles}
               onDismissError={dismissError}
               onClearAll={clearAll}
+              onReparseLayer={reparseLayer}
             />
           </div>
         )}
 
-        {/* Main */}
         <main className="flex-1 p-4 overflow-hidden">
           {hasLayers ? (
             <GerberPreview layers={layers} onAddFiles={handleFiles} />
@@ -139,7 +167,7 @@ function PcbIcon({ className }: { className?: string }) {
 function readFileAsText(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
+    reader.onload  = () => resolve(reader.result as string);
     reader.onerror = () => reject(new Error('Failed to read file'));
     reader.readAsText(file, 'utf-8');
   });
