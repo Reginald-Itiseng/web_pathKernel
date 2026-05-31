@@ -3,40 +3,42 @@ import { Canvas } from '@react-three/fiber';
 import { Grid, OrbitControls, GizmoHelper, GizmoViewport, Line, Html } from '@react-three/drei';
 import * as THREE from 'three';
 
+/**
+ * Coordinate convention (matches standard CNC/CAM and Gerber board space):
+ *   Gerber X  →  Three.js +X  (right)
+ *   Gerber Y  →  Three.js +Y  (up on screen when viewed from above)
+ *   Z                         (board normal — spindle travel direction)
+ *
+ * The board lies flat in the XY plane; the camera looks down from +Z.
+ */
+
 const FR4_THICKNESS = 1.6; // mm
-const FR4_GREEN = '#1e5c1a';
-const FR4_EDGE = '#174d14';
+const FR4_GREEN     = '#1e5c1a';
+const FR4_EDGE      = '#174d14';
 
 interface Props {
-  /** All values in mm, derived from the union viewBox / 1000. */
-  boardXMin: number;
-  boardYMin: number;
-  boardWidth: number;
+  boardXMin:   number;
+  boardYMin:   number;
+  boardWidth:  number;
   boardHeight: number;
 }
 
-/**
- * Coordinate mapping:
- *   Gerber X  →  Three.js +X  (right)
- *   Gerber Y  →  Three.js +Z  (depth)
- *   Board thickness  →  Three.js +Y  (up)
- *
- * The scene is therefore in real PCB millimetres and the board is placed
- * at its actual Gerber-space position rather than always at the origin.
- */
 export function BoardViewport3D({ boardXMin, boardYMin, boardWidth, boardHeight }: Props) {
-  const maxDim = Math.max(boardWidth, boardHeight);
+  const maxDim  = Math.max(boardWidth, boardHeight);
   const camDist = maxDim * 1.6;
 
-  // Centre of the board in Three.js / Gerber space
-  const cx = boardXMin + boardWidth / 2;
-  const cz = boardYMin + boardHeight / 2;
+  // Board centre in scene space
+  const cx = boardXMin + boardWidth  / 2;
+  const cy = boardYMin + boardHeight / 2;
 
   return (
     <div className="w-full h-full rounded-xl overflow-hidden">
       <Canvas
         camera={{
-          position: [cx, camDist * 0.7, cz + camDist],
+          // Positioned above and slightly "south" so the board is seen
+          // at a comfortable angle rather than perfectly top-down
+          position: [cx, cy - camDist * 0.4, camDist * 0.9],
+          up: [0, 1, 0],
           fov: 45,
           near: 0.1,
           far: maxDim * 20,
@@ -46,23 +48,28 @@ export function BoardViewport3D({ boardXMin, boardYMin, boardWidth, boardHeight 
         <color attach="background" args={['#0d1117']} />
 
         <ambientLight intensity={0.6} />
-        <directionalLight position={[cx + maxDim, maxDim * 1.5, cz + maxDim]} intensity={1.2} />
-        <directionalLight position={[cx - maxDim, maxDim, cz - maxDim * 0.5]} intensity={0.4} />
+        <directionalLight
+          position={[cx + maxDim, cy + maxDim, maxDim * 1.5]}
+          intensity={1.2}
+        />
+        <directionalLight
+          position={[cx - maxDim, cy - maxDim * 0.5, maxDim]}
+          intensity={0.4}
+        />
 
         <Suspense fallback={null}>
-          <FrSubstrate cx={cx} cz={cz} width={boardWidth} height={boardHeight} />
-          <SceneGrid cx={cx} cz={cz} boardWidth={boardWidth} boardHeight={boardHeight} />
+          <FrSubstrate cx={cx} cy={cy} width={boardWidth} height={boardHeight} />
+          <SceneGrid    cx={cx} cy={cy} boardWidth={boardWidth} boardHeight={boardHeight} />
           <OriginMarker maxDim={maxDim} />
         </Suspense>
 
         <OrbitControls
           makeDefault
-          target={[cx, 0, cz]}
+          target={[cx, cy, 0]}
           minDistance={maxDim * 0.2}
           maxDistance={maxDim * 5}
         />
 
-        {/* Axis indicator — labels show which direction is Gerber X / Y */}
         <GizmoHelper alignment="bottom-left" margin={[60, 60]}>
           <GizmoViewport
             axisColors={['#f87171', '#4ade80', '#60a5fa']}
@@ -74,20 +81,23 @@ export function BoardViewport3D({ boardXMin, boardYMin, boardWidth, boardHeight 
   );
 }
 
+// ─── FR4 substrate ───────────────────────────────────────────────────────────
+
 function FrSubstrate({
-  cx, cz, width, height,
+  cx, cy, width, height,
 }: {
-  cx: number; cz: number; width: number; height: number;
+  cx: number; cy: number; width: number; height: number;
 }) {
   const edgesGeo = useMemo(() => {
-    const box = new THREE.BoxGeometry(width, FR4_THICKNESS, height);
+    const box = new THREE.BoxGeometry(width, height, FR4_THICKNESS);
     return new THREE.EdgesGeometry(box);
   }, [width, height]);
 
   return (
-    <group position={[cx, 0, cz]}>
+    <group position={[cx, cy, 0]}>
       <mesh>
-        <boxGeometry args={[width, FR4_THICKNESS, height]} />
+        {/* width × height in XY plane, FR4_THICKNESS along Z */}
+        <boxGeometry args={[width, height, FR4_THICKNESS]} />
         <meshStandardMaterial color={FR4_GREEN} roughness={0.7} metalness={0} />
       </mesh>
       <lineSegments geometry={edgesGeo}>
@@ -97,17 +107,21 @@ function FrSubstrate({
   );
 }
 
+// ─── Reference grid ──────────────────────────────────────────────────────────
+
 function SceneGrid({
-  cx, cz, boardWidth, boardHeight,
+  cx, cy, boardWidth, boardHeight,
 }: {
-  cx: number; cz: number; boardWidth: number; boardHeight: number;
+  cx: number; cy: number; boardWidth: number; boardHeight: number;
 }) {
   const span = Math.max(boardWidth, boardHeight) * 4;
-  const yPos = -FR4_THICKNESS / 2 - 0.01;
+  // drei Grid lies in the XZ plane by default; rotate +90° around X to put it in XY
+  const zPos = -FR4_THICKNESS / 2 - 0.01;
 
   return (
     <Grid
-      position={[cx, yPos, cz]}
+      position={[cx, cy, zPos]}
+      rotation={[Math.PI / 2, 0, 0]}
       args={[span, span]}
       cellSize={1}
       cellThickness={0.4}
@@ -123,29 +137,24 @@ function SceneGrid({
   );
 }
 
-/**
- * Marks Gerber (0, 0) with two axis arms and a label.
- * Red arm  → +X (Gerber X)
- * Green arm → +Z (Gerber Y)
- */
+// ─── Origin marker ───────────────────────────────────────────────────────────
+
 function OriginMarker({ maxDim }: { maxDim: number }) {
-  const arm = Math.max(2, maxDim * 0.06);  // arm length scales with board
+  const arm = Math.max(2, maxDim * 0.06);
   const dot = arm * 0.12;
-  const y   = -FR4_THICKNESS / 2 - 0.05;  // sit just on the work-surface plane
+  const z   = -FR4_THICKNESS / 2 - 0.05; // sit on the work-surface plane
 
   return (
-    <group position={[0, y, 0]}>
-      {/* +X arm — red */}
+    <group position={[0, 0, z]}>
+      {/* +X arm — red (Gerber X) */}
       <Line points={[[0, 0, 0], [arm, 0, 0]]} color="#f87171" lineWidth={2} />
-      {/* +Z arm — green (= Gerber +Y) */}
-      <Line points={[[0, 0, 0], [0, 0, arm]]} color="#4ade80" lineWidth={2} />
-      {/* Origin dot */}
+      {/* +Y arm — green (Gerber Y, now truly upward in scene) */}
+      <Line points={[[0, 0, 0], [0, arm, 0]]} color="#4ade80" lineWidth={2} />
       <mesh>
         <sphereGeometry args={[dot, 12, 12]} />
         <meshBasicMaterial color="white" />
       </mesh>
-      {/* Label */}
-      <Html position={[arm * 0.35, dot * 2, arm * 0.35]} center>
+      <Html position={[arm * 0.35, arm * 0.35, dot * 2]} center>
         <span style={{
           color: '#94a3b8',
           fontSize: '11px',
