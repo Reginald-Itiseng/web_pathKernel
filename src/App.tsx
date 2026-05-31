@@ -1,9 +1,17 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import { GerberDropzone } from './components/GerberDropzone';
 import { GerberPreview } from './components/GerberPreview';
 import { LayerInfo } from './components/LayerInfo';
 import { parseGerber, type LayerEntry } from './utils/gerberUtils';
 import { LAYER_COLORS, detectLayerType } from './utils/layerUtils';
+import {
+  extractLayerGeometry,
+  editPadSize,
+  editTraceWidth,
+  editHoleDiameter,
+  matchPadsToHoles,
+} from './utils/geometryUtils';
+import type { PadHoleMatch } from './types/geometry';
 
 interface ParseError {
   filename: string;
@@ -33,7 +41,9 @@ export default function App() {
         const layerType = detectLayerType(file.name);
         const color     = LAYER_COLORS[layerType];
         const result    = await parseGerber(content, color, layerType === 'drill' ? 'drill' : 'gerber');
-        newLayers.push({ id: crypto.randomUUID(), file, result, layerType, color, visible: true });
+        const id        = crypto.randomUUID();
+        const geometry  = extractLayerGeometry(result.svgString, id, layerType, result.units);
+        newLayers.push({ id, file, result, layerType, color, visible: true, geometry });
       } catch (err) {
         newErrors.push({
           filename: file.name,
@@ -67,6 +77,56 @@ export default function App() {
 
   const clearAll = useCallback(() => setState(INITIAL), []);
 
+  // ── Geometry edit callbacks ───────────────────────────────────────────────
+
+  const updatePadSize = useCallback((layerId: string, defId: string, newDiameterMm: number) => {
+    setState((s) => ({
+      ...s,
+      layers: s.layers.map((l) => {
+        if (l.id !== layerId) return l;
+        const newSvg    = editPadSize(l.result.svgString, defId, newDiameterMm);
+        const newResult = { ...l.result, svgString: newSvg };
+        const geometry  = extractLayerGeometry(newSvg, l.id, l.layerType, l.result.units);
+        return { ...l, result: newResult, geometry };
+      }),
+    }));
+  }, []);
+
+  const updateTraceWidth = useCallback((layerId: string, oldRaw: number, newWidthMm: number) => {
+    setState((s) => ({
+      ...s,
+      layers: s.layers.map((l) => {
+        if (l.id !== layerId) return l;
+        const newSvg    = editTraceWidth(l.result.svgString, oldRaw, newWidthMm);
+        const newResult = { ...l.result, svgString: newSvg };
+        const geometry  = extractLayerGeometry(newSvg, l.id, l.layerType, l.result.units);
+        return { ...l, result: newResult, geometry };
+      }),
+    }));
+  }, []);
+
+  const updateHoleDiameter = useCallback((layerId: string, defId: string, newDiameterMm: number) => {
+    setState((s) => ({
+      ...s,
+      layers: s.layers.map((l) => {
+        if (l.id !== layerId) return l;
+        const newSvg    = editHoleDiameter(l.result.svgString, defId, newDiameterMm);
+        const newResult = { ...l.result, svgString: newSvg };
+        const geometry  = extractLayerGeometry(newSvg, l.id, l.layerType, l.result.units);
+        return { ...l, result: newResult, geometry };
+      }),
+    }));
+  }, []);
+
+  // ── Derived: cross-layer pad→hole matching ────────────────────────────────
+
+  const padHoleMatches: PadHoleMatch[] = useMemo(
+    () => matchPadsToHoles(state.layers),
+    [state.layers],
+  );
+
+  // ─────────────────────────────────────────────────────────────────────────
+
   const { layers, parsing, errors } = state;
   const hasLayers = layers.length > 0 || parsing || errors.length > 0;
 
@@ -84,16 +144,20 @@ export default function App() {
 
       <div className="flex flex-1 overflow-hidden">
         {hasLayers && (
-          <div className="shrink-0 w-60 border-r border-zinc-800 bg-zinc-950 p-4 overflow-hidden flex flex-col">
+          <div className="shrink-0 w-72 border-r border-zinc-800 bg-zinc-950 p-4 overflow-hidden flex flex-col">
             <LayerInfo
               layers={layers}
               parsing={parsing}
               errors={errors}
+              padHoleMatches={padHoleMatches}
               onToggle={toggleLayer}
               onRemove={removeLayer}
               onAddFiles={handleFiles}
               onDismissError={dismissError}
               onClearAll={clearAll}
+              onPadSizeChange={updatePadSize}
+              onTraceWidthChange={updateTraceWidth}
+              onHoleDiameterChange={updateHoleDiameter}
             />
           </div>
         )}

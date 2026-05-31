@@ -1,5 +1,6 @@
 import gerberToSvg from 'gerber-to-svg';
 import type { LayerType } from './layerUtils';
+import type { LayerGeometry } from '../types/geometry';
 
 export interface ParseResult {
   svgString: string;
@@ -18,6 +19,8 @@ export interface LayerEntry {
   layerType: LayerType;
   color: string;
   visible: boolean;
+  /** Populated after parsing via extractLayerGeometry; undefined until then. */
+  geometry?: LayerGeometry;
 }
 
 export function parseGerber(
@@ -187,7 +190,7 @@ function normaliseLayerYFlip(doc: Document, yTranslate: number): void {
   );
 }
 
-function formatSvgNumber(value: number): string {
+export function formatSvgNumber(value: number): string {
   return Number.isInteger(value) ? String(value) : value.toFixed(6).replace(/\.?0+$/, '');
 }
 
