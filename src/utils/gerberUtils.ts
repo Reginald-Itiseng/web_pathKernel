@@ -136,14 +136,40 @@ export function buildCompositeSvg(
     );
   });
 
+  // ── Origin marker ──────────────────────────────────────────────────────────
+  // Each layer's Y-flip bakes in: SVG_y = (vbH + 2·vbY) − gerber_y·1000
+  // For gerber y=0 → SVG_y = uvH + 2·uvY  (same for all same-board layers)
+  const y0   = uvH + 2 * uvY;
+  const arm  = Math.max(uvW, uvH) * 0.05;   // 5 % of larger board dimension
+  const sw   = Math.max(arm * 0.08, 50);    // stroke width, min 0.05 mm
+  const dot  = arm * 0.12;
+  const fs   = arm * 0.55;                  // font-size
+
+  const originMarker =
+    `<g id="gerber-origin" stroke-linecap="round" fill-rule="nonzero">` +
+      // +X arm — red (Gerber X direction)
+      `<line x1="0" y1="${y0}" x2="${arm}" y2="${y0}" ` +
+        `stroke="#f87171" stroke-width="${sw}"/>` +
+      // −SVG-Y arm — green (Gerber +Y direction, which is −Y in SVG)
+      `<line x1="0" y1="${y0}" x2="0" y2="${y0 - arm}" ` +
+        `stroke="#4ade80" stroke-width="${sw}"/>` +
+      // dot
+      `<circle cx="0" cy="${y0}" r="${dot}" fill="white"/>` +
+      // label
+      `<text x="${dot * 1.8}" y="${y0 - dot * 1.8}" ` +
+        `fill="#94a3b8" font-size="${fs}" font-family="monospace" ` +
+        `stroke="none">(0,0)</text>` +
+    `</g>`;
+
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" ` +
     `xmlns:xlink="http://www.w3.org/1999/xlink" ` +
     `width="100%" height="100%" ` +
     `viewBox="${uvX} ${uvY} ${uvW} ${uvH}" ` +
-    `preserveAspectRatio="xMidYMid meet" ` +
+    `preserveAspectRatio="xMidYMid meet" overflow="visible" ` +
     `stroke-linecap="round" stroke-linejoin="round" stroke-width="0" fill-rule="evenodd">` +
     nestedSvgs.join('') +
+    originMarker +
     `</svg>`
   );
 }
