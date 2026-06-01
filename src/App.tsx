@@ -1,17 +1,25 @@
-import { useState, useCallback, useMemo } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import { GerberDropzone } from './components/GerberDropzone';
 import { GerberPreview } from './components/GerberPreview';
 import { LayerInfo } from './components/LayerInfo';
 import { parseGerber, type LayerEntry } from './utils/gerberUtils';
 import { LAYER_COLORS, detectLayerType } from './utils/layerUtils';
 import {
-  extractLayerGeometry,
-  editPadSize,
-  editTraceWidth,
+  buildCamJob,
+  buildImportReport,
+  DEFAULT_DRILL_SETTINGS,
+  DEFAULT_HPGL_SETTINGS,
+  exportHpgl,
+} from './utils/camUtils';
+import {
+  addPathIds,
   editHoleDiameter,
-  matchPadsToHoles,
+  editPadSize,
+  editSingleTraceWidth,
+  editTraceWidth,
+  extractLayerGeometry,
 } from './utils/geometryUtils';
-import type { PadHoleMatch } from './types/geometry';
+import type { DrillParseSettings, GeometryHighlightTarget } from './types/geometry';
 
 interface ParseError {
   filename: string;
@@ -22,28 +30,62 @@ interface AppState {
   layers: LayerEntry[];
   parsing: boolean;
   errors: ParseError[];
+  past: LayerEntry[][];
+  future: LayerEntry[][];
 }
 
-const INITIAL: AppState = { layers: [], parsing: false, errors: [] };
+const INITIAL: AppState = { layers: [], parsing: false, errors: [], past: [], future: [] };
 
 export default function App() {
   const [state, setState] = useState<AppState>(INITIAL);
+  const [geometryHighlight, setGeometryHighlight] = useState<GeometryHighlightTarget | null>(null);
+
+  const commitLayers = useCallback((updater: (layers: LayerEntry[]) => LayerEntry[]) => {
+    setState((s) => ({
+      ...s,
+      layers: updater(s.layers),
+      past: [...s.past, s.layers],
+      future: [],
+    }));
+  }, []);
+
+  const createLayer = useCallback(async (file: File, content: string): Promise<LayerEntry> => {
+    const layerType = detectLayerType(file.name, content);
+    const parserFiletype = layerType === 'drill' ? 'drill' : 'gerber';
+    const color = LAYER_COLORS[layerType];
+    const drillSettings = parserFiletype === 'drill' ? DEFAULT_DRILL_SETTINGS : undefined;
+    const result = await parseGerber(content, color, parserFiletype);
+    const id = crypto.randomUUID();
+    const svgString = addPathIds(result.svgString, id);
+    const enriched = { ...result, svgString };
+    const geometry = extractLayerGeometry(svgString, id, layerType, result.units);
+    const importReport = buildImportReport(file, content, layerType, parserFiletype, enriched, geometry, drillSettings);
+
+    return {
+      id,
+      file,
+      sourceContent: content,
+      result: enriched,
+      layerType,
+      color,
+      visible: true,
+      geometry,
+      importReport,
+      drillSettings,
+    };
+  }, []);
 
   const handleFiles = useCallback(async (files: File[]) => {
     setState((s) => ({ ...s, parsing: true }));
-
     const newLayers: LayerEntry[] = [];
     const newErrors: ParseError[] = [];
 
     for (const file of files) {
+      // .gbrjob is a KiCad job manifest (JSON), not a Gerber file — skip it.
+      if (file.name.toLowerCase().endsWith('.gbrjob')) continue;
+
       try {
-        const content   = await readFileAsText(file);
-        const layerType = detectLayerType(file.name);
-        const color     = LAYER_COLORS[layerType];
-        const result    = await parseGerber(content, color, layerType === 'drill' ? 'drill' : 'gerber');
-        const id        = crypto.randomUUID();
-        const geometry  = extractLayerGeometry(result.svgString, id, layerType, result.units);
-        newLayers.push({ id, file, result, layerType, color, visible: true, geometry });
+        newLayers.push(await createLayer(file, await readFileAsText(file)));
       } catch (err) {
         newErrors.push({
           filename: file.name,
@@ -57,75 +99,122 @@ export default function App() {
       layers: [...s.layers, ...newLayers],
       parsing: false,
       errors: [...s.errors, ...newErrors],
+      past: newLayers.length ? [...s.past, s.layers] : s.past,
+      future: newLayers.length ? [] : s.future,
     }));
+  }, [createLayer]);
+
+  const rebuildEditedLayer = useCallback((
+    layer: LayerEntry,
+    svgString: string,
+  ): LayerEntry => {
+    const result = { ...layer.result, svgString };
+    const geometry = extractLayerGeometry(svgString, layer.id, layer.layerType, layer.result.units);
+    const importReport = buildImportReport(
+      layer.file,
+      layer.sourceContent,
+      layer.layerType,
+      layer.layerType === 'drill' ? 'drill' : 'gerber',
+      result,
+      geometry,
+      layer.drillSettings,
+    );
+    return { ...layer, result, geometry, importReport };
   }, []);
 
   const toggleLayer = useCallback((id: string) => {
-    setState((s) => ({
-      ...s,
-      layers: s.layers.map((l) => l.id === id ? { ...l, visible: !l.visible } : l),
-    }));
-  }, []);
+    commitLayers((layers) => layers.map((l) => l.id === id ? { ...l, visible: !l.visible } : l));
+  }, [commitLayers]);
 
   const removeLayer = useCallback((id: string) => {
-    setState((s) => ({ ...s, layers: s.layers.filter((l) => l.id !== id) }));
-  }, []);
+    commitLayers((layers) => layers.filter((l) => l.id !== id));
+  }, [commitLayers]);
 
   const dismissError = useCallback((filename: string) => {
     setState((s) => ({ ...s, errors: s.errors.filter((e) => e.filename !== filename) }));
   }, []);
 
-  const clearAll = useCallback(() => setState(INITIAL), []);
+  const clearAll = useCallback(() => {
+    setState((s) => ({
+      ...INITIAL,
+      past: s.layers.length ? [...s.past, s.layers] : s.past,
+    }));
+  }, []);
 
-  // ── Geometry edit callbacks ───────────────────────────────────────────────
+  const undo = useCallback(() => {
+    setState((s) => {
+      const previous = s.past[s.past.length - 1];
+      if (!previous) return s;
+      return { ...s, layers: previous, past: s.past.slice(0, -1), future: [s.layers, ...s.future] };
+    });
+  }, []);
+
+  const redo = useCallback(() => {
+    setState((s) => {
+      const next = s.future[0];
+      if (!next) return s;
+      return { ...s, layers: next, past: [...s.past, s.layers], future: s.future.slice(1) };
+    });
+  }, []);
 
   const updatePadSize = useCallback((layerId: string, defId: string, newDiameterMm: number) => {
-    setState((s) => ({
-      ...s,
-      layers: s.layers.map((l) => {
-        if (l.id !== layerId) return l;
-        const newSvg    = editPadSize(l.result.svgString, defId, newDiameterMm);
-        const newResult = { ...l.result, svgString: newSvg };
-        const geometry  = extractLayerGeometry(newSvg, l.id, l.layerType, l.result.units);
-        return { ...l, result: newResult, geometry };
-      }),
-    }));
-  }, []);
+    commitLayers((layers) => layers.map((l) => (
+      l.id === layerId ? rebuildEditedLayer(l, editPadSize(l.result.svgString, defId, newDiameterMm)) : l
+    )));
+  }, [commitLayers, rebuildEditedLayer]);
 
   const updateTraceWidth = useCallback((layerId: string, oldRaw: number, newWidthMm: number) => {
-    setState((s) => ({
-      ...s,
-      layers: s.layers.map((l) => {
-        if (l.id !== layerId) return l;
-        const newSvg    = editTraceWidth(l.result.svgString, oldRaw, newWidthMm);
-        const newResult = { ...l.result, svgString: newSvg };
-        const geometry  = extractLayerGeometry(newSvg, l.id, l.layerType, l.result.units);
-        return { ...l, result: newResult, geometry };
-      }),
-    }));
-  }, []);
+    commitLayers((layers) => layers.map((l) => (
+      l.id === layerId ? rebuildEditedLayer(l, editTraceWidth(l.result.svgString, oldRaw, newWidthMm)) : l
+    )));
+  }, [commitLayers, rebuildEditedLayer]);
+
+  const updateSingleTrace = useCallback((layerId: string, pathId: string, newWidthMm: number) => {
+    commitLayers((layers) => layers.map((l) => (
+      l.id === layerId ? rebuildEditedLayer(l, editSingleTraceWidth(l.result.svgString, pathId, newWidthMm)) : l
+    )));
+  }, [commitLayers, rebuildEditedLayer]);
 
   const updateHoleDiameter = useCallback((layerId: string, defId: string, newDiameterMm: number) => {
-    setState((s) => ({
-      ...s,
-      layers: s.layers.map((l) => {
-        if (l.id !== layerId) return l;
-        const newSvg    = editHoleDiameter(l.result.svgString, defId, newDiameterMm);
-        const newResult = { ...l.result, svgString: newSvg };
-        const geometry  = extractLayerGeometry(newSvg, l.id, l.layerType, l.result.units);
-        return { ...l, result: newResult, geometry };
-      }),
-    }));
-  }, []);
+    commitLayers((layers) => layers.map((l) => (
+      l.id === layerId ? rebuildEditedLayer(l, editHoleDiameter(l.result.svgString, defId, newDiameterMm)) : l
+    )));
+  }, [commitLayers, rebuildEditedLayer]);
 
-  // ── Derived: cross-layer pad→hole matching ────────────────────────────────
+  const updateDrillSettings = useCallback(async (layerId: string, settings: DrillParseSettings) => {
+    const layer = state.layers.find((l) => l.id === layerId);
+    if (!layer) return;
 
-  const padHoleMatches: PadHoleMatch[] = useMemo(
-    () => matchPadsToHoles(state.layers),
-    [state.layers],
-  );
+    try {
+      const backupUnits = settings.units === 'in' ? 'in' : 'mm';
+      const result = await parseGerber(layer.sourceContent, layer.color, 'drill', { backupUnits });
+      const svgString = addPathIds(result.svgString, layer.id);
+      const enriched = { ...result, svgString };
+      const geometry = extractLayerGeometry(svgString, layer.id, layer.layerType, result.units);
+      const importReport = buildImportReport(layer.file, layer.sourceContent, layer.layerType, 'drill', enriched, geometry, settings);
+      commitLayers((layers) => layers.map((l) => l.id === layerId
+        ? { ...l, result: enriched, geometry, importReport, drillSettings: settings }
+        : l));
+    } catch (err) {
+      setState((s) => ({
+        ...s,
+        errors: [...s.errors, { filename: layer.file.name, message: err instanceof Error ? err.message : 'Drill reparse failed' }],
+      }));
+    }
+  }, [commitLayers, state.layers]);
 
-  // ─────────────────────────────────────────────────────────────────────────
+  const camJob = useMemo(() => buildCamJob(state.layers), [state.layers]);
+
+  const exportGenericHpgl = useCallback(() => {
+    const hpgl = exportHpgl(camJob.operations, camJob.boardBounds, DEFAULT_HPGL_SETTINGS);
+    const blob = new Blob([hpgl], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'pcb-cam-v1.hpgl';
+    link.click();
+    URL.revokeObjectURL(url);
+  }, [camJob]);
 
   const { layers, parsing, errors } = state;
   const hasLayers = layers.length > 0 || parsing || errors.length > 0;
@@ -138,18 +227,23 @@ export default function App() {
           <span className="font-semibold text-zinc-100 tracking-tight">PCB Mill CAM</span>
         </div>
         <span className="px-2 py-0.5 rounded-full bg-zinc-800 border border-zinc-700 text-xs text-zinc-400">
-          Phase 1 — Preview
+          Robust CAM V1
         </span>
+        <div className="ml-auto flex items-center gap-1">
+          <HeaderButton onClick={undo} disabled={state.past.length === 0}>Undo</HeaderButton>
+          <HeaderButton onClick={redo} disabled={state.future.length === 0}>Redo</HeaderButton>
+          <HeaderButton onClick={exportGenericHpgl} disabled={camJob.operations.length === 0}>Export HPGL</HeaderButton>
+        </div>
       </header>
 
       <div className="flex flex-1 overflow-hidden">
         {hasLayers && (
-          <div className="shrink-0 w-72 border-r border-zinc-800 bg-zinc-950 p-4 overflow-hidden flex flex-col">
+          <div className="shrink-0 w-80 border-r border-zinc-800 bg-zinc-950 p-4 overflow-hidden flex flex-col">
             <LayerInfo
               layers={layers}
               parsing={parsing}
               errors={errors}
-              padHoleMatches={padHoleMatches}
+              camJob={camJob}
               onToggle={toggleLayer}
               onRemove={removeLayer}
               onAddFiles={handleFiles}
@@ -158,6 +252,8 @@ export default function App() {
               onPadSizeChange={updatePadSize}
               onTraceWidthChange={updateTraceWidth}
               onHoleDiameterChange={updateHoleDiameter}
+              onGeometryHighlight={setGeometryHighlight}
+              onDrillSettingsChange={updateDrillSettings}
             />
           </div>
         )}
@@ -167,10 +263,12 @@ export default function App() {
             <GerberPreview
               layers={layers}
               onAddFiles={handleFiles}
-              padHoleMatches={padHoleMatches}
+              padHoleMatches={camJob.padHoleAnalysis.matches}
               onPadSizeChange={updatePadSize}
               onTraceWidthChange={updateTraceWidth}
+              onSingleTraceWidthChange={updateSingleTrace}
               onHoleDiameterChange={updateHoleDiameter}
+              geometryHighlight={geometryHighlight}
             />
           ) : (
             <GerberDropzone onFiles={handleFiles} />
@@ -191,10 +289,22 @@ function PcbIcon({ className }: { className?: string }) {
   );
 }
 
+function HeaderButton({ onClick, disabled, children }: { onClick: () => void; disabled?: boolean; children: React.ReactNode }) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      className="px-2.5 py-1 text-xs rounded bg-zinc-800 text-zinc-300 hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed"
+    >
+      {children}
+    </button>
+  );
+}
+
 function readFileAsText(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload  = () => resolve(reader.result as string);
+    reader.onload = () => resolve(reader.result as string);
     reader.onerror = () => reject(new Error('Failed to read file'));
     reader.readAsText(file, 'utf-8');
   });
