@@ -1,7 +1,7 @@
 import React, { useCallback, useRef, useState } from 'react';
+import { acceptedFileExtensions } from '../utils/layerUtils';
 
-const ACCEPTED = '.gbr,.gtl,.gbl,.gts,.gbs,.ger,.art,.gto,.gbo,.gko,.drl';
-const DISPLAY_EXTS = ['.gbr', '.gtl', '.gbl', '.gts', '.gbs', '.ger', '.art'];
+const DISPLAY_EXTS = ['.gbr', '.gtl', '.gbl', '.gko', '.drl', '.xln'];
 
 interface Props {
   onFiles: (files: File[]) => void;
@@ -52,7 +52,7 @@ export function GerberDropzone({ onFiles }: Props) {
       <input
         ref={inputRef}
         type="file"
-        accept={ACCEPTED}
+        accept={acceptedFileExtensions()}
         multiple
         className="hidden"
         onChange={handleChange}

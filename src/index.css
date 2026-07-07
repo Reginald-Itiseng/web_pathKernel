@@ -30,6 +30,36 @@ body,
   cursor: pointer;
 }
 
+.pcb-interactive [data-hovered="true"] {
+  filter:
+    drop-shadow(0 0 2px #fef08a)
+    drop-shadow(0 0 7px rgba(250, 204, 21, 0.9));
+}
+
+.pcb-interactive use[data-hovered="true"] {
+  fill: #fde047;
+  stroke: #fef08a;
+}
+
+.pcb-interactive path[fill="none"][data-hovered="true"] {
+  stroke: #fef08a;
+}
+
+.pcb-interactive [data-panel-highlight="true"] {
+  filter:
+    drop-shadow(0 0 3px #22d3ee)
+    drop-shadow(0 0 10px rgba(34, 211, 238, 0.95));
+}
+
+.pcb-interactive use[data-panel-highlight="true"] {
+  fill: #67e8f9;
+  stroke: #cffafe;
+}
+
+.pcb-interactive path[fill="none"][data-panel-highlight="true"] {
+  stroke: #67e8f9;
+}
+
 /* Only the outermost composite SVG fills the wrapper.
    Nested layer SVGs must keep their explicit x/y/width/height
    attributes for coordinate-space mapping to work correctly. */

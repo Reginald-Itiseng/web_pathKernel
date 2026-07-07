@@ -1,6 +1,6 @@
 import gerberToSvg from 'gerber-to-svg';
 import type { LayerType } from './layerUtils';
-import type { LayerGeometry } from '../types/geometry';
+import type { DrillParseSettings, ImportReport, LayerGeometry } from '../types/geometry';
 
 export interface ParseResult {
   svgString: string;
@@ -15,10 +15,13 @@ export interface ParseResult {
 export interface LayerEntry {
   id: string;
   file: File;
+  sourceContent: string;
   result: ParseResult;
   layerType: LayerType;
   color: string;
   visible: boolean;
+  importReport: ImportReport;
+  drillSettings?: DrillParseSettings;
   /** Populated after parsing via extractLayerGeometry; undefined until then. */
   geometry?: LayerGeometry;
 }
@@ -27,6 +30,7 @@ export function parseGerber(
   content: string,
   color: string,
   filetype: 'gerber' | 'drill' = 'gerber',
+  options: { backupUnits?: 'mm' | 'in' } = {},
 ): Promise<ParseResult> {
   return new Promise((resolve, reject) => {
     const chunks: string[] = [];
@@ -37,7 +41,7 @@ export function parseGerber(
       filetype,
       // Default backup to mm — most modern PCBs are metric and older Excellon
       // files often omit the METRIC/INCH header, which would otherwise default to 'in'
-      backupUnits: 'mm',
+      backupUnits: options.backupUnits ?? 'mm',
     });
 
     converter.on('data', (chunk) => chunks.push(String(chunk)));

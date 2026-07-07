@@ -2,6 +2,7 @@ import React, { useRef, useState } from 'react';
 import type { LayerEntry } from '../utils/gerberUtils';
 import type {
   PadDefinition,
+  GeometryHighlightTarget,
   PadHoleMatch,
   TraceClass,
 } from '../types/geometry';
@@ -13,11 +14,13 @@ interface Props {
   onPadSizeChange:      (layerId: string, defId: string, newDiameterMm: number) => void;
   onTraceWidthChange:   (layerId: string, oldRaw: number, newWidthMm: number) => void;
   onHoleDiameterChange: (layerId: string, defId: string, newDiameterMm: number) => void;
+  onGeometryHighlight:  (target: GeometryHighlightTarget | null) => void;
 }
 
 export function GeometryPanel({
   layer, matches,
   onPadSizeChange, onTraceWidthChange, onHoleDiameterChange,
+  onGeometryHighlight,
 }: Props) {
   const [open, setOpen] = useState(false);
   const geo = layer.geometry;
@@ -57,11 +60,13 @@ export function GeometryPanel({
                 defs={geo.padDefs}
                 layerId={layer.id}
                 onApply={onPadSizeChange}
+                onGeometryHighlight={onGeometryHighlight}
               />
               <TraceSection
                 classes={geo.traceClasses}
                 layerId={layer.id}
                 onApply={onTraceWidthChange}
+                onGeometryHighlight={onGeometryHighlight}
               />
               {layerMatches.length > 0 && (
                 <MatchSection matches={layerMatches} />
@@ -75,6 +80,7 @@ export function GeometryPanel({
               holeCount={geo.holeInstances.length}
               layerId={layer.id}
               onApply={onHoleDiameterChange}
+              onGeometryHighlight={onGeometryHighlight}
             />
           )}
 
@@ -89,10 +95,11 @@ export function GeometryPanel({
 
 // ─── Pad types section ────────────────────────────────────────────────────────
 
-function PadSection({ defs, layerId, onApply }: {
+function PadSection({ defs, layerId, onApply, onGeometryHighlight }: {
   defs: PadDefinition[];
   layerId: string;
   onApply: (layerId: string, defId: string, newDiameterMm: number) => void;
+  onGeometryHighlight: (target: GeometryHighlightTarget | null) => void;
 }) {
   if (defs.length === 0) return null;
   return (
@@ -100,23 +107,34 @@ function PadSection({ defs, layerId, onApply }: {
       <SectionLabel>Pad Types</SectionLabel>
       <div className="flex flex-col gap-1.5 mt-1">
         {defs.map((def) => (
-          <PadRow key={def.defId} def={def} layerId={layerId} onApply={onApply} />
+          <PadRow
+            key={def.defId}
+            def={def}
+            layerId={layerId}
+            onApply={onApply}
+            onGeometryHighlight={onGeometryHighlight}
+          />
         ))}
       </div>
     </div>
   );
 }
 
-function PadRow({ def, layerId, onApply }: {
+function PadRow({ def, layerId, onApply, onGeometryHighlight }: {
   def: PadDefinition;
   layerId: string;
   onApply: (layerId: string, defId: string, newDiameterMm: number) => void;
+  onGeometryHighlight: (target: GeometryHighlightTarget | null) => void;
 }) {
   const isEditable = def.shape === 'circle' || def.shape === 'ring' || def.shape === 'rect';
   const currentValue = def.diameterMm ?? (def.widthMm ? Math.max(def.widthMm, def.heightMm ?? 0) : null);
 
   return (
-    <div className="flex items-center gap-2">
+    <div
+      className="flex items-center gap-2 rounded px-1 py-0.5 hover:bg-zinc-800/70"
+      onMouseEnter={() => onGeometryHighlight({ type: 'pad-def', layerId, defId: def.defId })}
+      onMouseLeave={() => onGeometryHighlight(null)}
+    >
       <ShapeTag shape={def.shape} />
       <span className="text-xs text-zinc-400 font-mono truncate max-w-[60px]" title={def.toolCode}>
         {def.toolCode}
@@ -139,10 +157,11 @@ function PadRow({ def, layerId, onApply }: {
 
 // ─── Trace widths section ─────────────────────────────────────────────────────
 
-function TraceSection({ classes, layerId, onApply }: {
+function TraceSection({ classes, layerId, onApply, onGeometryHighlight }: {
   classes: TraceClass[];
   layerId: string;
   onApply: (layerId: string, oldRaw: number, newWidthMm: number) => void;
+  onGeometryHighlight: (target: GeometryHighlightTarget | null) => void;
 }) {
   if (classes.length === 0) return null;
   return (
@@ -150,7 +169,16 @@ function TraceSection({ classes, layerId, onApply }: {
       <SectionLabel>Trace Widths</SectionLabel>
       <div className="flex flex-col gap-1.5 mt-1">
         {classes.map((tc) => (
-          <div key={tc.strokeWidthRaw} className="flex items-center gap-2">
+          <div
+            key={tc.strokeWidthRaw}
+            className="flex items-center gap-2 rounded px-1 py-0.5 hover:bg-zinc-800/70"
+            onMouseEnter={() => onGeometryHighlight({
+              type: 'trace-width',
+              layerId,
+              strokeWidthRaw: tc.strokeWidthRaw,
+            })}
+            onMouseLeave={() => onGeometryHighlight(null)}
+          >
             <span className="text-zinc-600 text-sm">—</span>
             <span className="text-xs text-zinc-500">({tc.instanceCount}×)</span>
             <div className="flex-1" />
@@ -168,11 +196,12 @@ function TraceSection({ classes, layerId, onApply }: {
 
 // ─── Drill sizes section ──────────────────────────────────────────────────────
 
-function DrillSection({ defs, holeCount, layerId, onApply }: {
+function DrillSection({ defs, holeCount, layerId, onApply, onGeometryHighlight }: {
   defs: PadDefinition[];
   holeCount: number;
   layerId: string;
   onApply: (layerId: string, defId: string, newDiameterMm: number) => void;
+  onGeometryHighlight: (target: GeometryHighlightTarget | null) => void;
 }) {
   const drillDefs = defs.filter((d) => d.shape === 'circle' && d.diameterMm != null);
   if (drillDefs.length === 0) return null;
@@ -182,7 +211,12 @@ function DrillSection({ defs, holeCount, layerId, onApply }: {
       <SectionLabel>Drill Sizes ({holeCount} holes)</SectionLabel>
       <div className="flex flex-col gap-1.5 mt-1">
         {drillDefs.map((def) => (
-          <div key={def.defId} className="flex items-center gap-2">
+          <div
+            key={def.defId}
+            className="flex items-center gap-2 rounded px-1 py-0.5 hover:bg-zinc-800/70"
+            onMouseEnter={() => onGeometryHighlight({ type: 'pad-def', layerId, defId: def.defId })}
+            onMouseLeave={() => onGeometryHighlight(null)}
+          >
             <span className="text-zinc-500 text-sm">○</span>
             <span className="text-xs text-zinc-400 font-mono truncate max-w-[60px]" title={def.toolCode}>
               {def.toolCode}

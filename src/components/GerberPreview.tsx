@@ -1,4 +1,4 @@
-import React, { Suspense, lazy, useState, useCallback } from 'react';
+import React, { Suspense, lazy, useState, useCallback, useRef } from 'react';
 import {
   computeUnionViewBox,
   buildCompositeSvg,
@@ -7,7 +7,7 @@ import {
 } from '../utils/gerberUtils';
 import { LAYER_Z_ORDER } from '../utils/layerUtils';
 import { SelectionPopup, type ElementSelection } from './SelectionPopup';
-import type { PadHoleMatch } from '../types/geometry';
+import type { GeometryHighlightTarget, PadHoleMatch } from '../types/geometry';
 
 const BoardViewport3D = lazy(() =>
   import('./BoardViewport3D').then((m) => ({ default: m.BoardViewport3D })),
@@ -17,9 +17,11 @@ interface Props {
   layers: LayerEntry[];
   onAddFiles: (files: File[]) => void;
   padHoleMatches: PadHoleMatch[];
-  onPadSizeChange:      (layerId: string, defId: string, newDiameterMm: number) => void;
-  onTraceWidthChange:   (layerId: string, oldRaw: number, newWidthMm: number) => void;
-  onHoleDiameterChange: (layerId: string, defId: string, newDiameterMm: number) => void;
+  onPadSizeChange:             (layerId: string, defId: string,   newDiameterMm: number) => void;
+  onTraceWidthChange:          (layerId: string, oldRaw: number,  newWidthMm: number)    => void;
+  onSingleTraceWidthChange:    (layerId: string, pathId: string,  newWidthMm: number)    => void;
+  onHoleDiameterChange:        (layerId: string, defId: string,   newDiameterMm: number) => void;
+  geometryHighlight: GeometryHighlightTarget | null;
 }
 
 type Tab = '2d' | '3d';
@@ -30,32 +32,131 @@ const ZOOM_STEP = 1.25;
 
 export function GerberPreview({
   layers, onAddFiles,
-  padHoleMatches, onPadSizeChange, onTraceWidthChange, onHoleDiameterChange,
+  padHoleMatches,
+  onPadSizeChange, onTraceWidthChange, onSingleTraceWidthChange, onHoleDiameterChange,
+  geometryHighlight,
 }: Props) {
-  const [tab, setTab] = useState<Tab>('2d');
-  const [zoom, setZoom] = useState(1);
+  const [tab, setTab]           = useState<Tab>('2d');
+  const [zoom, setZoom]         = useState(1);
   const [dropOver, setDropOver] = useState(false);
   const [selection, setSelection] = useState<ElementSelection | null>(null);
 
-  const zoomIn  = () => setZoom((z) => Math.min(z * ZOOM_STEP, MAX_ZOOM));
-  const zoomOut = () => setZoom((z) => Math.max(z / ZOOM_STEP, MIN_ZOOM));
+  // Hover element tracked via ref — no re-render needed
+  const hoveredElRef = useRef<Element | null>(null);
+  const wrapperRef = useRef<HTMLDivElement>(null);
+  const panelHighlightedElsRef = useRef<Element[]>([]);
+
+  const zoomIn    = () => setZoom((z) => Math.min(z * ZOOM_STEP, MAX_ZOOM));
+  const zoomOut   = () => setZoom((z) => Math.max(z / ZOOM_STEP, MIN_ZOOM));
   const fitScreen = () => setZoom(1);
 
-  const handleDrop = useCallback(
-    (e: React.DragEvent) => {
-      e.preventDefault();
-      setDropOver(false);
-      const files = Array.from(e.dataTransfer.files);
-      if (files.length) onAddFiles(files);
-    },
-    [onAddFiles],
-  );
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setDropOver(false);
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length) onAddFiles(files);
+  }, [onAddFiles]);
 
-  // ── Element picking on SVG click ──────────────────────────────────────────
+  // ── Hover highlighting ────────────────────────────────────────────────────
+  // We mutate the SVG DOM directly (no React state) to keep it performant.
+  const handleMouseMove = useCallback((e: React.MouseEvent) => {
+    const target = e.target as Element;
+    if (target === e.currentTarget) {
+      hoveredElRef.current?.removeAttribute('data-hovered');
+      hoveredElRef.current = null;
+      return;
+    }
+
+    const el: Element | null =
+      (target.closest('use') as Element | null) ??
+      (target.tagName.toLowerCase() === 'path' &&
+       target.getAttribute('fill') === 'none'
+        ? target
+        : null);
+
+    if (el === hoveredElRef.current) return;
+    hoveredElRef.current?.removeAttribute('data-hovered');
+    hoveredElRef.current = el;
+    el?.setAttribute('data-hovered', 'true');
+  }, []);
+
+  const handleMouseLeave = useCallback(() => {
+    hoveredElRef.current?.removeAttribute('data-hovered');
+    hoveredElRef.current = null;
+  }, []);
+
+  const clearPanelHighlight = useCallback(() => {
+    for (const el of panelHighlightedElsRef.current) {
+      el.removeAttribute('data-panel-highlight');
+    }
+    panelHighlightedElsRef.current = [];
+  }, []);
+
+  const addPanelHighlight = useCallback((el: Element | null | undefined) => {
+    if (!el || panelHighlightedElsRef.current.includes(el)) return;
+    el.setAttribute('data-panel-highlight', 'true');
+    panelHighlightedElsRef.current.push(el);
+  }, []);
+
+  const getLayerSvg = useCallback((layerId: string): SVGSVGElement | null => {
+    const root = wrapperRef.current;
+    if (!root) return null;
+    return Array.from(root.querySelectorAll<SVGSVGElement>('svg[data-layer-id]'))
+      .find((svg) => svg.getAttribute('data-layer-id') === layerId) ?? null;
+  }, []);
+
+  const highlightPadDef = useCallback((layerId: string, defId: string) => {
+    const layerSvg = getLayerSvg(layerId);
+    if (!layerSvg) return;
+    for (const use of Array.from(layerSvg.querySelectorAll('use'))) {
+      const href = use.getAttribute('xlink:href') ?? use.getAttribute('href') ?? '';
+      if ((href.startsWith('#') ? href.slice(1) : href) === defId) {
+        addPanelHighlight(use);
+      }
+    }
+  }, [addPanelHighlight, getLayerSvg]);
+
+  const highlightPadInstance = useCallback((layerId: string, defId: string, xMm: number, yMm: number) => {
+    const layerSvg = getLayerSvg(layerId);
+    const layer = layers.find((l) => l.id === layerId);
+    if (!layerSvg || !layer) return;
+
+    const scale = layer.result.units === 'in' ? 25.4 : 1;
+    const toleranceMm = 0.001;
+    for (const use of Array.from(layerSvg.querySelectorAll('use'))) {
+      const href = use.getAttribute('xlink:href') ?? use.getAttribute('href') ?? '';
+      const useDefId = href.startsWith('#') ? href.slice(1) : href;
+      if (useDefId !== defId) continue;
+
+      const useX = (parseFloat(use.getAttribute('x') ?? '0') / 1000) * scale;
+      const useY = (parseFloat(use.getAttribute('y') ?? '0') / 1000) * scale;
+      if (Math.abs(useX - xMm) <= toleranceMm && Math.abs(useY - yMm) <= toleranceMm) {
+        addPanelHighlight(use);
+      }
+    }
+  }, [addPanelHighlight, getLayerSvg, layers]);
+
+  const highlightPadInstanceById = useCallback((layerId: string, instanceId: string) => {
+    const layerSvg = getLayerSvg(layerId);
+    if (!layerSvg) return;
+    addPanelHighlight(layerSvg.querySelector(`[data-pad-instance-id="${cssEscape(instanceId)}"]`));
+  }, [addPanelHighlight, getLayerSvg]);
+
+  const highlightTraceWidth = useCallback((layerId: string, strokeWidthRaw: number) => {
+    const layerSvg = getLayerSvg(layerId);
+    if (!layerSvg) return;
+    for (const path of Array.from(layerSvg.querySelectorAll('path[fill="none"]'))) {
+      const raw = parseFloat(path.getAttribute('stroke-width') ?? '');
+      if (Number.isFinite(raw) && Math.abs(raw - strokeWidthRaw) < 0.000001) {
+        addPanelHighlight(path);
+      }
+    }
+  }, [addPanelHighlight, getLayerSvg]);
+
+  // ── Element selection on click ────────────────────────────────────────────
   const handleCompositeClick = useCallback((e: React.MouseEvent) => {
     const target = e.target as Element;
 
-    // Which nested layer SVG was clicked?
     const layerSvg = target.closest('[data-layer-id]');
     const layerId  = layerSvg?.getAttribute('data-layer-id');
     if (!layerId) { setSelection(null); return; }
@@ -63,44 +164,57 @@ export function GerberPreview({
     const layer = layers.find((l) => l.id === layerId);
     if (!layer?.geometry) { setSelection(null); return; }
 
-    // ── Pad / drill hole: look for <use xlink:href="#...">
-    const useEl =
-      target.tagName.toLowerCase() === 'use'
-        ? target
-        : (target.closest('use') as Element | null);
-
+    // Pad / drill hole: <use xlink:href="#...pad-...">
+    const useEl = (target.closest('use') as Element | null) ??
+      (target.tagName.toLowerCase() === 'use' ? target : null);
     if (useEl) {
-      const href = useEl.getAttribute('xlink:href') ?? useEl.getAttribute('href') ?? '';
-      if (href.includes('_pad-')) {
-        const defId = href.startsWith('#') ? href.slice(1) : href;
-        const knownDef = layer.geometry.padDefs.find((d) => d.defId === defId);
-        if (knownDef) {
-          setSelection({ type: 'pad', layerId, defId, strokeWidthRaw: 0, clientX: e.clientX, clientY: e.clientY });
-          return;
-        }
+      const href  = useEl.getAttribute('xlink:href') ?? useEl.getAttribute('href') ?? '';
+      const defId = href.startsWith('#') ? href.slice(1) : href;
+      if (defId && layer.geometry.padDefs.some((d) => d.defId === defId)) {
+        const scale = layer.result.units === 'in' ? 25.4 : 1;
+        const xMm = (parseFloat(useEl.getAttribute('x') ?? '0') / 1000) * scale;
+        const yMm = (parseFloat(useEl.getAttribute('y') ?? '0') / 1000) * scale;
+        const instanceId = useEl.getAttribute('data-pad-instance-id') ?? undefined;
+        setSelection({
+          type: 'pad',
+          layerId,
+          defId,
+          strokeWidthRaw: 0,
+          pathId: undefined,
+          instanceId,
+          xMm,
+          yMm,
+          clientX: e.clientX,
+          clientY: e.clientY,
+        });
+        return;
       }
     }
 
-    // ── Trace: <path fill="none" stroke-width="...">
+    // Trace: <path fill="none" stroke-width="...">
     const pathEl =
-      target.tagName.toLowerCase() === 'path'
-        ? target
-        : (target.closest('path') as Element | null);
-
-    if (pathEl) {
-      const sw   = pathEl.getAttribute('stroke-width');
-      const fill = pathEl.getAttribute('fill');
-      if (sw && fill === 'none') {
-        const raw = parseFloat(sw);
-        const known = layer.geometry.traceClasses.find((t) => t.strokeWidthRaw === raw);
-        if (known) {
-          setSelection({ type: 'trace', layerId, defId: '', strokeWidthRaw: raw, clientX: e.clientX, clientY: e.clientY });
-          return;
-        }
+      (target.tagName.toLowerCase() === 'path' ? target : null) ??
+      (target.closest('path') as Element | null);
+    if (pathEl && pathEl.getAttribute('fill') === 'none') {
+      const raw   = parseFloat(pathEl.getAttribute('stroke-width') ?? '0');
+      const pathId = pathEl.getAttribute('data-path-id') ?? undefined;
+      if (isFinite(raw) && raw > 0 && layer.geometry.traceClasses.some((t) => t.strokeWidthRaw === raw)) {
+        setSelection({
+          type: 'trace',
+          layerId,
+          defId: '',
+          strokeWidthRaw: raw,
+          pathId,
+          instanceId: undefined,
+          xMm: undefined,
+          yMm: undefined,
+          clientX: e.clientX,
+          clientY: e.clientY,
+        });
+        return;
       }
     }
 
-    // Click on background — dismiss
     setSelection(null);
   }, [layers]);
 
@@ -118,23 +232,62 @@ export function GerberPreview({
       ? prepareSvgForDisplay(visibleLayers[0].result.svgString)
       : null;
 
+  React.useEffect(() => {
+    clearPanelHighlight();
+    if (!geometryHighlight) return;
+
+    if (geometryHighlight.type === 'trace-width') {
+      highlightTraceWidth(geometryHighlight.layerId, geometryHighlight.strokeWidthRaw);
+      return;
+    }
+
+    if (geometryHighlight.type === 'pad-instance') {
+      highlightPadInstanceById(geometryHighlight.layerId, geometryHighlight.instanceId);
+      for (const match of padHoleMatches) {
+        if (match.pad.layerId === geometryHighlight.layerId && match.pad.instanceId === geometryHighlight.instanceId) {
+          highlightPadInstanceById(match.hole.layerId, match.hole.instanceId.replace(':hole:', ':pad:'));
+        }
+        if (match.hole.layerId === geometryHighlight.layerId && match.hole.instanceId === geometryHighlight.instanceId.replace(':pad:', ':hole:')) {
+          highlightPadInstanceById(match.pad.layerId, match.pad.instanceId);
+        }
+      }
+      return;
+    }
+
+    highlightPadDef(geometryHighlight.layerId, geometryHighlight.defId);
+
+    for (const match of padHoleMatches) {
+      if (match.pad.layerId === geometryHighlight.layerId && match.pad.defId === geometryHighlight.defId) {
+        highlightPadInstance(match.hole.layerId, match.hole.defId, match.hole.xMm, match.hole.yMm);
+      }
+      if (match.hole.layerId === geometryHighlight.layerId && match.hole.defId === geometryHighlight.defId) {
+        highlightPadInstance(match.pad.layerId, match.pad.defId, match.pad.xMm, match.pad.yMm);
+      }
+    }
+  }, [
+    clearPanelHighlight,
+    compositeSvg,
+    geometryHighlight,
+    highlightPadDef,
+    highlightPadInstanceById,
+    highlightPadInstance,
+    highlightTraceWidth,
+    padHoleMatches,
+  ]);
+
   const firstUnits = layers.find((l) => l.result.units)?.result.units ?? 'mm';
   const boardXMin  = unionViewBox ? unionViewBox[0] / 1000 : null;
   const boardYMin  = unionViewBox ? unionViewBox[1] / 1000 : null;
   const boardW     = unionViewBox ? unionViewBox[2] / 1000 : null;
   const boardH     = unionViewBox ? unionViewBox[3] / 1000 : null;
-  const has3d = boardXMin != null && boardYMin != null && boardW != null && boardH != null;
+  const has3d      = boardXMin != null && boardYMin != null && boardW != null && boardH != null;
 
   return (
     <div className="flex flex-col h-full">
       {/* Tab bar */}
       <div className="shrink-0 flex items-center gap-1 mb-3">
-        <TabButton active={tab === '2d'} onClick={() => setTab('2d')}>
-          2D Preview
-        </TabButton>
-        <TabButton active={tab === '3d'} onClick={() => setTab('3d')} disabled={!has3d}>
-          3D View
-        </TabButton>
+        <TabButton active={tab === '2d'} onClick={() => setTab('2d')}>2D Preview</TabButton>
+        <TabButton active={tab === '3d'} onClick={() => setTab('3d')} disabled={!has3d}>3D View</TabButton>
         <span className="ml-auto text-xs text-zinc-500">
           {visibleLayers.length} of {layers.length} layer{layers.length !== 1 ? 's' : ''} visible
         </span>
@@ -157,23 +310,19 @@ export function GerberPreview({
         {tab === '2d' && (
           <>
             <div
+              ref={wrapperRef}
               className="absolute inset-0 p-4 gerber-svg-wrapper pcb-interactive"
-              style={{
-                transform: `scale(${zoom})`,
-                transformOrigin: 'center center',
-                transition: 'transform 0.12s ease',
-              }}
+              style={{ transform: `scale(${zoom})`, transformOrigin: 'center center', transition: 'transform 0.12s ease' }}
               dangerouslySetInnerHTML={{ __html: compositeSvg ?? '' }}
               onClick={handleCompositeClick}
+              onMouseMove={handleMouseMove}
+              onMouseLeave={handleMouseLeave}
             />
 
             {/* Zoom controls */}
             <div className="absolute bottom-3 right-3 flex items-center gap-1 bg-zinc-900/90 border border-zinc-700 rounded-lg p-1 backdrop-blur-sm">
               <ZoomButton onClick={zoomOut} title="Zoom out" disabled={zoom <= MIN_ZOOM}><MinusIcon /></ZoomButton>
-              <button
-                onClick={fitScreen}
-                className="px-2 py-1 text-xs font-mono text-zinc-300 hover:text-zinc-100 hover:bg-zinc-700 rounded transition-colors min-w-[3.5rem] text-center"
-              >
+              <button onClick={fitScreen} className="px-2 py-1 text-xs font-mono text-zinc-300 hover:text-zinc-100 hover:bg-zinc-700 rounded transition-colors min-w-[3.5rem] text-center">
                 {Math.round(zoom * 100)}%
               </button>
               <ZoomButton onClick={zoomIn} title="Zoom in" disabled={zoom >= MAX_ZOOM}><PlusIcon /></ZoomButton>
@@ -181,7 +330,6 @@ export function GerberPreview({
               <ZoomButton onClick={fitScreen} title="Fit to screen"><FitIcon /></ZoomButton>
             </div>
 
-            {/* Hint */}
             {!dropOver && !selection && (
               <div className="absolute bottom-3 left-3 text-xs text-zinc-600 pointer-events-none">
                 Click a pad or trace to edit · Drag files to add layers
@@ -213,7 +361,7 @@ export function GerberPreview({
         )}
       </div>
 
-      {/* Board dimensions row */}
+      {/* Board dimensions */}
       {boardW && boardH && (
         <div className="mt-2 flex items-center gap-2">
           <span className="px-3 py-1 rounded-full bg-zinc-800 border border-zinc-700 text-zinc-300 text-xs font-mono">
@@ -222,7 +370,7 @@ export function GerberPreview({
         </div>
       )}
 
-      {/* Selection popup (portal-free: fixed positioned) */}
+      {/* Selection popup */}
       {selection && (
         <SelectionPopup
           selection={selection}
@@ -230,6 +378,7 @@ export function GerberPreview({
           padHoleMatches={padHoleMatches}
           onPadSizeChange={onPadSizeChange}
           onTraceWidthChange={onTraceWidthChange}
+          onSingleTraceWidthChange={onSingleTraceWidthChange}
           onHoleDiameterChange={onHoleDiameterChange}
           onClose={() => setSelection(null)}
         />
@@ -240,21 +389,16 @@ export function GerberPreview({
 
 // ─── Small components ─────────────────────────────────────────────────────────
 
-function TabButton({ active, onClick, disabled, children }: {
-  active: boolean; onClick: () => void; disabled?: boolean; children: React.ReactNode;
-}) {
+function TabButton({ active, onClick, disabled, children }: { active: boolean; onClick: () => void; disabled?: boolean; children: React.ReactNode }) {
   return (
     <button onClick={onClick} disabled={disabled}
       className={['px-4 py-1.5 text-sm rounded-lg transition-colors disabled:cursor-not-allowed',
-        active ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 disabled:opacity-40',
-      ].join(' ')}>
+        active ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 disabled:opacity-40'].join(' ')}>
       {children}
     </button>
   );
 }
-function ZoomButton({ onClick, title, disabled, children }: {
-  onClick: () => void; title: string; disabled?: boolean; children: React.ReactNode;
-}) {
+function ZoomButton({ onClick, title, disabled, children }: { onClick: () => void; title: string; disabled?: boolean; children: React.ReactNode }) {
   return (
     <button onClick={onClick} title={title} disabled={disabled}
       className="p-1.5 rounded text-zinc-300 hover:text-zinc-100 hover:bg-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed transition-colors">
@@ -265,3 +409,7 @@ function ZoomButton({ onClick, title, disabled, children }: {
 function PlusIcon()  { return <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M8 3v10M3 8h10"/></svg>; }
 function MinusIcon() { return <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M3 8h10"/></svg>; }
 function FitIcon()   { return <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M1 5V2h3M12 2h3v3M15 11v3h-3M4 14H1v-3"/></svg>; }
+
+function cssEscape(value: string): string {
+  return value.replace(/["\\]/g, '\\$&');
+}

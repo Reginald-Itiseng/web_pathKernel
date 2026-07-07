@@ -18,6 +18,8 @@ export interface PadDefinition {
 
 /** One placed pad instance — a `<use>` element inside the layer group. */
 export interface PadInstance {
+  instanceId: string;
+  featureId: string;
   /** References PadDefinition.defId */
   defId: string;
   /** use.x / 1000 — Gerber X in mm (pre-Y-flip coordinate) */
@@ -35,10 +37,13 @@ export interface TraceClass {
   widthMm: number;
   instanceCount: number;
   layerId: string;
+  pathIds: string[];
 }
 
 /** One drill hole instance extracted from a drill layer. */
 export interface HoleInstance {
+  instanceId: string;
+  featureId: string;
   defId: string;
   diameterMm: number;
   xMm: number;
@@ -51,7 +56,34 @@ export interface PadHoleMatch {
   pad: PadInstance;
   hole: HoleInstance;
   distanceMm: number;
+  annularRingMm: number | null;
+  status: 'matched' | 'ambiguous' | 'diameter-warning';
 }
+
+export interface PadHoleAnalysis {
+  matches: PadHoleMatch[];
+  ambiguousMatches: PadHoleMatch[];
+  unmatchedPads: PadInstance[];
+  unmatchedHoles: HoleInstance[];
+  annularWarnings: PadHoleMatch[];
+}
+
+export type GeometryHighlightTarget =
+  | {
+      type: 'pad-def';
+      layerId: string;
+      defId: string;
+    }
+  | {
+      type: 'trace-width';
+      layerId: string;
+      strokeWidthRaw: number;
+    }
+  | {
+      type: 'pad-instance';
+      layerId: string;
+      instanceId: string;
+    };
 
 export interface LayerGeometry {
   layerId: string;
@@ -60,4 +92,81 @@ export interface LayerGeometry {
   traceClasses: TraceClass[];
   /** Populated for drill layers; empty array for copper / silkscreen / etc. */
   holeInstances: HoleInstance[];
+}
+
+export interface DrillParseSettings {
+  units: 'auto' | 'mm' | 'in';
+  zeroSuppression: 'auto' | 'leading' | 'trailing';
+  integerDigits: number;
+  decimalDigits: number;
+  plated: 'unknown' | 'plated' | 'non-plated';
+  scale: number;
+  offsetXmm: number;
+  offsetYmm: number;
+}
+
+export interface ImportReport {
+  filename: string;
+  detectedType: import('../utils/layerUtils').LayerType;
+  confidence: 'high' | 'medium' | 'low';
+  parserFiletype: 'gerber' | 'drill';
+  units: string | null;
+  viewBox: number[] | null;
+  warnings: string[];
+  geometryCounts: {
+    padTypes: number;
+    padInstances: number;
+    traceClasses: number;
+    holes: number;
+  };
+  drillSettings?: DrillParseSettings;
+}
+
+export type ValidationSeverity = 'error' | 'warning' | 'info';
+
+export interface ValidationIssue {
+  id: string;
+  severity: ValidationSeverity;
+  title: string;
+  detail: string;
+  layerId?: string;
+  featureId?: string;
+}
+
+export interface ValidationRuleSet {
+  minTraceWidthMm: number;
+  minDrillMm: number;
+  minAnnularRingMm: number;
+  minIsolationMm: number;
+  matchToleranceMm: number;
+  outlineClosureToleranceMm: number;
+}
+
+export interface Point2D {
+  x: number;
+  y: number;
+}
+
+export interface CamOperation {
+  id: string;
+  type: 'isolation' | 'drill' | 'outline';
+  layerId: string;
+  label: string;
+  paths: Point2D[][];
+}
+
+export interface HpglExportSettings {
+  unitsPerMm: number;
+  origin: 'board-min' | 'absolute';
+  invertY: boolean;
+  penNumber: number;
+}
+
+export interface CamJob {
+  layers: import('../utils/gerberUtils').LayerEntry[];
+  boardBounds: [number, number, number, number] | null;
+  importReports: ImportReport[];
+  padHoleAnalysis: PadHoleAnalysis;
+  validationIssues: ValidationIssue[];
+  operations: CamOperation[];
 }
