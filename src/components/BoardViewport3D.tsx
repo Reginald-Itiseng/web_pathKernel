@@ -24,6 +24,7 @@ const TOOLPATH_COLORS: Record<OperationKind, string> = {
   isolation: '#f0f',
   drill: '#22d3ee',
   cutout: '#4ade80',
+  centering: '#79c0ff',
 };
 
 interface FallbackBounds {
@@ -36,9 +37,11 @@ interface FallbackBounds {
 interface Props {
   model: Board3DModel | null;
   fallbackBounds: FallbackBounds | null;
+  /** Operation ids hidden via the op card eye toggles. */
+  hiddenOpIds?: Set<string>;
 }
 
-export function BoardViewport3D({ model, fallbackBounds }: Props) {
+export function BoardViewport3D({ model, fallbackBounds, hiddenOpIds }: Props) {
   const [showToolpaths, setShowToolpaths] = useState(true);
   const [showCopper, setShowCopper] = useState(true);
 
@@ -79,7 +82,7 @@ export function BoardViewport3D({ model, fallbackBounds }: Props) {
             <>
               <BoardSolid model={model} />
               {showCopper && <CopperSolids model={model} />}
-              {showToolpaths && <ToolpathLines model={model} />}
+              {showToolpaths && <ToolpathLines model={model} hiddenOpIds={hiddenOpIds} />}
             </>
           ) : (
             <FallbackSlab cx={cx} cy={cy} width={width} height={height} thickness={thickness} />
@@ -264,12 +267,21 @@ function CopperLayer({
 }
 
 /** Toolpath centerline overlay, hovering just off its side's copper face. */
-function ToolpathLines({ model }: { model: Board3DModel }) {
+function ToolpathLines({
+  model,
+  hiddenOpIds,
+}: {
+  model: Board3DModel;
+  hiddenOpIds?: Set<string>;
+}) {
   const zTop = model.copperThicknessMm + 0.15;
   const zBottom = -model.boardThicknessMm - model.copperThicknessMm - 0.15;
+  const toolpaths = hiddenOpIds
+    ? model.toolpaths.filter((tp) => !hiddenOpIds.has(tp.opId))
+    : model.toolpaths;
   return (
     <>
-      {model.toolpaths.map((tp) => {
+      {toolpaths.map((tp) => {
         const z = tp.side === 'bottom' ? zBottom : zTop;
         return tp.polylines
           .filter((line) => line.length >= 2)

@@ -19,6 +19,7 @@ export const TOOLPATH_COLORS: Record<OperationKind, string> = {
   isolation: '#f0f',
   drill: '#22d3ee',
   cutout: '#4ade80',
+  centering: '#79c0ff',
 };
 
 interface Props {
@@ -32,6 +33,10 @@ interface Props {
   geometryHighlight: GeometryHighlightTarget | null;
   camResult: KernelJobResult | null;
   boardModel: Board3DModel | null;
+  /** When set, only this layer is rendered (solo/inspect mode). */
+  soloLayerId: string | null;
+  /** Operation ids whose toolpaths are hidden via the op card eye toggle. */
+  hiddenOpIds: Set<string>;
 }
 
 type Tab = '2d' | '3d';
@@ -46,6 +51,7 @@ export function GerberPreview({
   onPadSizeChange, onTraceWidthChange, onSingleTraceWidthChange, onHoleDiameterChange,
   geometryHighlight,
   camResult, boardModel,
+  soloLayerId, hiddenOpIds,
 }: Props) {
   const [tab, setTab]           = useState<Tab>('2d');
   // Zoom and pan live in ONE state object so every update is a single pure
@@ -58,6 +64,7 @@ export function GerberPreview({
     isolation: true,
     drill: true,
     cutout: true,
+    centering: true,
   });
 
   // Hover element tracked via ref — no re-render needed
@@ -328,7 +335,7 @@ export function GerberPreview({
   // ─────────────────────────────────────────────────────────────────────────
 
   const visibleLayers = [...layers]
-    .filter((l) => l.visible)
+    .filter((l) => (soloLayerId != null ? l.id === soloLayerId : l.visible))
     .sort((a, b) => LAYER_Z_ORDER[a.layerType] - LAYER_Z_ORDER[b.layerType]);
 
   const unionViewBox = computeUnionViewBox(visibleLayers.map((l) => l.result));
@@ -390,7 +397,7 @@ export function GerberPreview({
     (boardXMin != null && boardYMin != null && boardW != null && boardH != null);
 
   // ── Toolpath overlay (kernel results drawn over the composite) ────────────
-  const toolpathOps = camResult?.operations ?? [];
+  const toolpathOps = (camResult?.operations ?? []).filter((op) => !hiddenOpIds.has(op.id));
   const hasToolpaths = toolpathOps.length > 0;
   const overlaySvg = React.useMemo(() => {
     if (!unionViewBox || toolpathOps.length === 0) return null;
@@ -533,6 +540,7 @@ export function GerberPreview({
             }>
               <BoardViewport3D
                 model={boardModel}
+                hiddenOpIds={hiddenOpIds}
                 fallbackBounds={
                   boardXMin != null && boardYMin != null && boardW != null && boardH != null
                     ? { xMin: boardXMin, yMin: boardYMin, width: boardW, height: boardH }

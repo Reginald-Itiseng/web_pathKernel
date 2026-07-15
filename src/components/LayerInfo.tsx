@@ -18,6 +18,8 @@ interface Props {
   errors: Array<{ filename: string; message: string }>;
   onToggle: (id: string) => void;
   onRemove: (id: string) => void;
+  soloLayerId: string | null;
+  onToggleSolo: (id: string) => void;
   onAddFiles: (files: File[]) => void;
   onDismissError: (filename: string) => void;
   onClearAll: () => void;
@@ -29,6 +31,7 @@ interface Props {
   opConfigs: OpConfigMap;
   onOpConfigChange: (layerId: string, config: OpConfig) => void;
   onGenerate: () => void;
+  onGenerateCentering: () => void;
   onExport: () => void;
   kernelBusy: KernelProgress | null;
   camResult: KernelJobResult | null;
@@ -44,6 +47,8 @@ export function LayerInfo({
   errors,
   onToggle,
   onRemove,
+  soloLayerId,
+  onToggleSolo,
   onAddFiles,
   onDismissError,
   onClearAll,
@@ -55,6 +60,7 @@ export function LayerInfo({
   opConfigs,
   onOpConfigChange,
   onGenerate,
+  onGenerateCentering,
   onExport,
   kernelBusy,
   camResult,
@@ -99,8 +105,11 @@ export function LayerInfo({
               key={layer.id}
               layer={layer}
               selected={selectedId === layer.id}
+              solo={soloLayerId === layer.id}
+              soloActive={soloLayerId != null}
               onSelect={() => setSelectedId(selectedId === layer.id ? null : layer.id)}
               onToggle={() => onToggle(layer.id)}
+              onToggleSolo={() => onToggleSolo(layer.id)}
               onRemove={() => onRemove(layer.id)}
             />
           ))}
@@ -128,6 +137,7 @@ export function LayerInfo({
           configs={opConfigs}
           onConfigChange={onOpConfigChange}
           onGenerate={onGenerate}
+          onGenerateCentering={onGenerateCentering}
           onExport={onExport}
           busy={kernelBusy}
           camResult={camResult}
@@ -228,11 +238,14 @@ function DrillSettingsPanel({ layer, onApply }: { layer: LayerEntry; onApply: (s
   );
 }
 
-function LayerRow({ layer, selected, onSelect, onToggle, onRemove }: {
+function LayerRow({ layer, selected, solo, soloActive, onSelect, onToggle, onToggleSolo, onRemove }: {
   layer: LayerEntry;
   selected: boolean;
+  solo: boolean;
+  soloActive: boolean;
   onSelect: () => void;
   onToggle: () => void;
+  onToggleSolo: () => void;
   onRemove: () => void;
 }) {
   const color = LAYER_COLORS[layer.layerType];
@@ -247,8 +260,9 @@ function LayerRow({ layer, selected, onSelect, onToggle, onRemove }: {
     <div
       className={[
         'flex items-center gap-2 px-2 py-1.5 rounded-lg group cursor-pointer',
-        layer.visible ? 'bg-zinc-800/60' : 'bg-zinc-900/40 opacity-50',
+        layer.visible && (!soloActive || solo) ? 'bg-zinc-800/60' : 'bg-zinc-900/40 opacity-50',
         selected ? 'ring-1 ring-green-500/40' : '',
+        solo ? 'ring-1 ring-sky-400/60' : '',
       ].join(' ')}
       onClick={onSelect}
       title={warnings.length > 0 ? warnings.join('\n') : `Detection confidence: ${confidence}`}
@@ -264,10 +278,20 @@ function LayerRow({ layer, selected, onSelect, onToggle, onRemove }: {
               {sourceBadge}
             </span>
           )}
+          {solo && <span className="px-1 rounded bg-sky-950 text-[10px] text-sky-300">solo</span>}
           {warnings.length > 0 && <span className="text-amber-300">({warnings.length})</span>}
         </p>
       </div>
-      <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity" onClick={(e) => e.stopPropagation()}>
+      <div
+        className={[
+          'flex items-center gap-0.5 transition-opacity',
+          solo ? 'opacity-100' : 'opacity-0 group-hover:opacity-100',
+        ].join(' ')}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <IconButton onClick={onToggleSolo} title={solo ? 'Exit solo view' : 'Solo — show only this layer'}>
+          <TargetIcon active={solo} />
+        </IconButton>
         <IconButton onClick={onToggle} title={layer.visible ? 'Hide' : 'Show'}>{layer.visible ? <EyeIcon /> : <EyeOffIcon />}</IconButton>
         <IconButton onClick={onRemove} title="Remove"><XIcon /></IconButton>
       </div>
@@ -291,4 +315,12 @@ function EyeOffIcon() {
 }
 function XIcon() {
   return <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M3 3l10 10M13 3 3 13" /></svg>;
+}
+function TargetIcon({ active }: { active: boolean }) {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke={active ? '#38bdf8' : 'currentColor'} strokeWidth="1.5" strokeLinecap="round">
+      <circle cx="8" cy="8" r="5.5" />
+      <circle cx="8" cy="8" r="1.5" fill={active ? '#38bdf8' : 'none'} />
+    </svg>
+  );
 }

@@ -6,7 +6,9 @@ import { ToastStack, type Toast } from './components/ToastStack';
 import { ValidationBadge } from './components/ValidationBadge';
 import {
   buildOperationRequests,
+  CENTERING_KEY,
   DEFAULT_STOCK_CONFIG,
+  opIdFor,
   resolveStockSettings,
   seedOpConfigs,
   type OpConfig,
@@ -49,6 +51,7 @@ const INITIAL: AppState = { layers: [], parsing: false, errors: [], past: [], fu
 export default function App() {
   const [state, setState] = useState<AppState>(INITIAL);
   const [geometryHighlight, setGeometryHighlight] = useState<GeometryHighlightTarget | null>(null);
+  const [soloLayerId, setSoloLayerId] = useState<string | null>(null);
 
   // ── CAM kernel state ───────────────────────────────────────────────────────
   const [opConfigs, setOpConfigs] = useState<OpConfigMap>({});
@@ -260,9 +263,35 @@ export default function App() {
     setOpConfigs((prev) => seedOpConfigs(state.layers, prev));
   }, [state.layers]);
 
-  const setOpConfig = useCallback((layerId: string, config: OpConfig) => {
-    setOpConfigs((prev) => ({ ...prev, [layerId]: config }));
+  const setOpConfig = useCallback((key: string, config: OpConfig) => {
+    setOpConfigs((prev) => {
+      const next = { ...prev, [key]: config };
+      // Enabling centering implies a double-sided flip workflow: default the
+      // bottom-copper isolation to mirrored so previews match the machine.
+      if (key === CENTERING_KEY && config.enabled && !prev[CENTERING_KEY]?.enabled) {
+        for (const layer of state.layers) {
+          const c = next[layer.id];
+          if (layer.layerType === 'bottom-copper' && c?.kind === 'isolation' && !c.mirror) {
+            next[layer.id] = { ...c, mirror: true };
+          }
+        }
+      }
+      return next;
+    });
     setCamStale(true);
+  }, [state.layers]);
+
+  // Toolpath overlays hidden via each operation card's eye toggle.
+  const hiddenOpIds = useMemo(() => {
+    const hidden = new Set<string>();
+    for (const [key, config] of Object.entries(opConfigs)) {
+      if (!config.overlayVisible) hidden.add(opIdFor(key, config));
+    }
+    return hidden;
+  }, [opConfigs]);
+
+  const toggleSolo = useCallback((layerId: string) => {
+    setSoloLayerId((prev) => (prev === layerId ? null : layerId));
   }, []);
 
   const updateStockConfig = useCallback((next: StockConfig) => {
@@ -346,7 +375,55 @@ export default function App() {
     }
   }, [state.layers, opConfigs, stockConfig, circuitSizeMm, pushToast]);
 
-  const exportKernelHpgl = useCallback(() => {
+  // Generate ONLY the centering holes (workflow step 1) — drilled first so
+  // the stock can be pinned before any side is machined.
+  const generateCentering = useCallback(async () => {
+    const kernelLayers = buildKernelLayers(state.layers);
+    if (kernelLayers.length === 0) return;
+    // Enable centering so subsequent full generates keep including it.
+    const centering = opConfigs[CENTERING_KEY];
+    if (!centering) return;
+    const enabledConfigs: OpConfigMap = {
+      ...opConfigs,
+      [CENTERING_KEY]: { ...centering, enabled: true } as OpConfig,
+    };
+    // Pin registration implies a flip workflow — default bottom isolation to
+    // mirrored-at-export (user can untick it in the bottom layer settings).
+    if (!centering.enabled) {
+      for (const layer of state.layers) {
+        const c = enabledConfigs[layer.id];
+        if (layer.layerType === 'bottom-copper' && c?.kind === 'isolation' && !c.mirror) {
+          enabledConfigs[layer.id] = { ...c, mirror: true };
+        }
+      }
+    }
+    setOpConfigs(enabledConfigs);
+    const centeringOnly = buildOperationRequests(state.layers, enabledConfigs).filter(
+      (op) => op.kind === 'centering',
+    );
+    if (centeringOnly.length === 0) {
+      pushToast('warn', 'No centering operation could be built.');
+      return;
+    }
+    setKernelBusy({ stage: 'Centering holes', pct: 0 });
+    try {
+      const result = await runKernelJobInWorker(
+        { layers: kernelLayers, operations: centeringOnly, stock: resolveStockSettings(stockConfig) },
+        (progress) => setKernelBusy(progress),
+      );
+      setCamResult(result);
+      setBoardModel(result.board3d);
+      setCamStale(false);
+      for (const warning of result.warnings.slice(0, 3)) pushToast('warn', warning);
+      pushToast('info', 'Centering holes generated — drill these first, then pin and machine.');
+    } catch (err) {
+      pushToast('error', `Centering generation failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setKernelBusy(null);
+    }
+  }, [state.layers, opConfigs, stockConfig, pushToast]);
+
+  const exportKernelHpgl = useCallback(async () => {
     if (!camResult || camResult.operations.length === 0) return;
     try {
       // Machine origin = stock bottom-left corner (circuit coords minus the
@@ -356,20 +433,46 @@ export default function App() {
       const circuitMin = camJob.boardBounds
         ? { x: camJob.boardBounds[0] / 1000, y: camJob.boardBounds[1] / 1000 }
         : { x: 0, y: 0 };
-      const { text } = exportHpgl(camResult.operations, {
+      const exportOpts = {
         absoluteOriginMm: { x: circuitMin.x - offsetX, y: circuitMin.y - offsetY },
-      });
-      const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = 'pathkernel-job.hpgl';
-      link.click();
-      URL.revokeObjectURL(url);
+        mirrorAxis: camResult.mirrorAxis,
+      };
+
+      // One file per operation, numbered in machining order.
+      const layerTypeById = new Map(state.layers.map((l) => [l.id, l.layerType]));
+      const layerFileById = new Map(state.layers.map((l) => [l.id, l.file.name]));
+      const orderOf = (op: (typeof camResult.operations)[number]): number => {
+        if (op.kind === 'centering') return 0;
+        if (op.kind === 'isolation') {
+          return layerTypeById.get(op.layerId) === 'bottom-copper' ? 2 : 1;
+        }
+        return op.kind === 'drill' ? 3 : 4;
+      };
+      const ordered = [...camResult.operations].sort((a, b) => orderOf(a) - orderOf(b));
+
+      for (let i = 0; i < ordered.length; i++) {
+        const op = ordered[i];
+        const { text } = exportHpgl([op], exportOpts);
+        const base =
+          op.kind === 'centering'
+            ? 'centering'
+            : `${op.kind}-${sanitizeName(layerFileById.get(op.layerId) ?? op.layerId)}`;
+        const name = `${String(i + 1).padStart(2, '0')}-${base}${op.mirror ? '-mirrored' : ''}.hpgl`;
+        const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = name;
+        link.click();
+        URL.revokeObjectURL(url);
+        // Give the browser breathing room between programmatic downloads.
+        if (i < ordered.length - 1) await new Promise((r) => setTimeout(r, 350));
+      }
+      pushToast('info', `Exported ${ordered.length} HPGL file(s) in machining order.`);
     } catch (err) {
       pushToast('error', `HPGL export failed: ${err instanceof Error ? err.message : String(err)}`);
     }
-  }, [camResult, stockConfig, camJob.boardBounds, pushToast]);
+  }, [camResult, stockConfig, camJob.boardBounds, state.layers, pushToast]);
 
   const { layers, parsing, errors } = state;
   const hasLayers = layers.length > 0 || parsing || errors.length > 0;
@@ -403,6 +506,8 @@ export default function App() {
               errors={errors}
               onToggle={toggleLayer}
               onRemove={removeLayer}
+              soloLayerId={soloLayerId}
+              onToggleSolo={toggleSolo}
               onAddFiles={handleFiles}
               onDismissError={dismissError}
               onClearAll={clearAll}
@@ -414,6 +519,7 @@ export default function App() {
               opConfigs={opConfigs}
               onOpConfigChange={setOpConfig}
               onGenerate={generateToolpaths}
+              onGenerateCentering={generateCentering}
               onExport={exportKernelHpgl}
               kernelBusy={kernelBusy}
               camResult={camResult}
@@ -438,6 +544,8 @@ export default function App() {
               geometryHighlight={geometryHighlight}
               camResult={camResult}
               boardModel={boardModel}
+              soloLayerId={soloLayerId}
+              hiddenOpIds={hiddenOpIds}
             />
           ) : (
             <GerberDropzone onFiles={handleFiles} />
@@ -470,6 +578,13 @@ function HeaderButton({ onClick, disabled, children }: { onClick: () => void; di
       {children}
     </button>
   );
+}
+
+function sanitizeName(name: string): string {
+  return name
+    .replace(/\.[^.]+$/, '')
+    .replace(/[^a-zA-Z0-9_-]+/g, '_')
+    .slice(0, 40);
 }
 
 function readFileAsText(file: File): Promise<string> {

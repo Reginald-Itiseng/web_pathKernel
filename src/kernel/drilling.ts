@@ -20,6 +20,41 @@ export interface DrillInput {
 
 const EPSILON_PLUNGE = 1e-4;
 
+/**
+ * Strategy-A machining of a single hole: explicit center plunge (ε-line so
+ * HPGL emits a pen-down) plus concentric CCW boring arcs when the hole is
+ * larger than the tool. Shared by drilling and centering-holes ops.
+ */
+export function boreHole(
+  x: number,
+  y: number,
+  holeDiameter: number,
+  toolDia: number,
+  stepoverMm: number,
+): { strokes: Stroke[]; polylines: KPoint[][]; borePasses: number } {
+  const strokes: Stroke[] = [];
+  const polylines: KPoint[][] = [];
+
+  const start: KPoint = { x, y };
+  const plungeEnd: KPoint = { x: x + EPSILON_PLUNGE, y };
+  strokes.push({ type: 'line', start, end: plungeEnd });
+  polylines.push([start, plungeEnd]);
+
+  const orbitRadius = Math.max(0, (holeDiameter - toolDia) / 2);
+  let borePasses = 0;
+  if (orbitRadius > 0.0005) {
+    const passes = Math.max(1, Math.ceil(orbitRadius / stepoverMm));
+    for (let passIdx = 1; passIdx <= passes; passIdx++) {
+      const passRadius = orbitRadius * (passIdx / passes);
+      const arcStart: KPoint = { x: x + passRadius, y };
+      strokes.push({ type: 'arc', start: arcStart, end: arcStart, center: { x, y }, ccw: true });
+      polylines.push(flattenArc(arcStart, arcStart, { x, y }, true));
+      borePasses++;
+    }
+  }
+  return { strokes, polylines, borePasses };
+}
+
 export function buildDrillToolpaths(input: DrillInput): KernelOpResult {
   const { holes, params } = input;
   if (holes.length === 0) {
@@ -51,32 +86,13 @@ export function buildDrillToolpaths(input: DrillInput): KernelOpResult {
       oversizedHoles++;
     }
 
-    const orbitRadius = Math.max(0, (hole.diameter - toolDia) / 2);
-
-    // Explicit center plunge as an epsilon line.
-    const start: KPoint = { x: hole.x, y: hole.y };
-    const plungeEnd: KPoint = { x: hole.x + EPSILON_PLUNGE, y: hole.y };
-    strokes.push({ type: 'line', start, end: plungeEnd });
-    previewPolylines.push([start, plungeEnd]);
+    const bored = boreHole(hole.x, hole.y, hole.diameter, toolDia, stepoverMm);
+    strokes.push(...bored.strokes);
+    previewPolylines.push(...bored.polylines);
     plungeCount++;
-
-    if (orbitRadius <= 0.0005) continue;
-
-    boreHoleCount++;
-    const passes = Math.max(1, Math.ceil(orbitRadius / stepoverMm));
-    for (let passIdx = 1; passIdx <= passes; passIdx++) {
-      const passRadius = orbitRadius * (passIdx / passes);
-      const arcStart: KPoint = { x: hole.x + passRadius, y: hole.y };
-      const arc: Stroke = {
-        type: 'arc',
-        start: arcStart,
-        end: arcStart,
-        center: { x: hole.x, y: hole.y },
-        ccw: true,
-      };
-      strokes.push(arc);
-      previewPolylines.push(flattenArc(arcStart, arcStart, arc.center, true));
-      borePassCount++;
+    if (bored.borePasses > 0) {
+      boreHoleCount++;
+      borePassCount += bored.borePasses;
     }
   }
 

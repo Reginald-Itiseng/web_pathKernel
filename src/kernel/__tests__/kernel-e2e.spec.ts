@@ -171,6 +171,79 @@ describe('kernel end-to-end on motor_driver', () => {
     }
   });
 
+  it('extra pad contours add strokes clipped against existing passes', async () => {
+    const baseOp = input.operations.find((o) => o.kind === 'isolation')!;
+    const withPads = await runKernelJob({
+      layers: input.layers,
+      operations: [
+        {
+          ...baseOp,
+          id: 'iso-pads',
+          params: { ...baseOp.params, extraPadContours: 2 },
+        } as typeof baseOp,
+      ],
+    });
+    const op = withPads.operations[0];
+    const baseline = result.operations.find((o) => o.id === baseOp.id)!;
+    expect(op.stats.padContourCount ?? 0).toBeGreaterThan(0);
+    expect(op.stats.strokeCount).toBeGreaterThan(baseline.stats.strokeCount);
+    expect(op.stats.pathLengthMm).toBeGreaterThan(baseline.stats.pathLengthMm);
+    expect(op.meta.extra_pad_contours).toBe('2');
+  }, 60_000);
+
+  it('mirrored bottom isolation reflects about the centering axis', async () => {
+    const topIso = input.operations.find((o) => o.kind === 'isolation')!;
+    const bottomIso = { ...topIso, layerId: 'bcu' };
+    const job = await runKernelJob({
+      layers: input.layers,
+      operations: [
+        { ...bottomIso, id: 'iso-plain' },
+        { ...bottomIso, id: 'iso-mirrored', mirror: true },
+        {
+          id: 'centering',
+          kind: 'centering',
+          layerId: 'edge',
+          toolNumber: 4,
+          params: {
+            orientation: 'horizontal',
+            holeCount: 2,
+            outlineToHoleCenterMm: 12,
+            holeSpacingMm: 10,
+            holeDiameterMm: 3,
+            toolDiameterMm: 1,
+            lateralStepoverPct: 50,
+          },
+        },
+      ],
+    });
+    expect(job.mirrorAxis).not.toBeNull();
+    expect(job.mirrorAxis!.axis).toBe('y'); // horizontal flip axis
+    const plain = job.operations.find((o) => o.id === 'iso-plain')!;
+    const mirrored = job.operations.find((o) => o.id === 'iso-mirrored')!;
+    const axisY = job.mirrorAxis!.position;
+
+    // Previews stay artwork-aligned — identical geometry, only the flag set.
+    expect(mirrored.mirror).toBe(true);
+    expect(mirrored.previewPolylines[0][0]).toEqual(plain.previewPolylines[0][0]);
+
+    // The EXPORT applies the reflection about the axis.
+    const exportOpts = { absoluteOriginMm: { x: 0, y: 0 }, mirrorAxis: job.mirrorAxis };
+    const plainText = exportHpgl([plain], exportOpts).text;
+    const mirroredText = exportHpgl([mirrored], exportOpts).text;
+    const firstPu = (text: string) => {
+      const m = /PU(-?\d+),(-?\d+);/.exec(text)!;
+      return { x: Number(m[1]), y: Number(m[2]) };
+    };
+    const p = firstPu(plainText);
+    const m = firstPu(mirroredText);
+    expect(m.x).toBe(p.x);
+    expect(m.y).toBe(Math.round(2 * axisY * 40 - p.y)); // 40 units/mm
+
+    // Centering op generated with holes outside the board on the axis.
+    const centering = job.operations.find((o) => o.kind === 'centering')!;
+    expect(centering.stats.plungeCount).toBe(2);
+  }, 60_000);
+
   it('3D single-sided: only one clad side when one copper layer is loaded', async () => {
     const singleSided = await runKernelJob({
       layers: input.layers.filter((l) => l.role !== 'bottom-copper'),

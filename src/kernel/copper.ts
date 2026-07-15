@@ -153,6 +153,22 @@ export function collectPadPolygons(primitives: KPrimitive[]): KPoint[][] {
   return rings;
 }
 
+/**
+ * Collect dark copper that is NOT a flashed pad (traces, regions/zones) —
+ * used as a keepout so extra pad contours stay clear of other copper.
+ * Port of Python `_collect_non_pad_shapes`.
+ */
+export function collectNonPadPolygons(primitives: KPrimitive[]): KPoint[][] {
+  const rings: KPoint[][] = [];
+  for (const primitive of primitives) {
+    if (primitive.type === 'drill') continue;
+    if (primitive.polarity === 'clear') continue;
+    if ('flashed' in primitive && primitive.flashed) continue;
+    rings.push(...primitiveToPolygons(primitive));
+  }
+  return rings;
+}
+
 /** Collect drill hole descriptors from a layer's primitives. */
 export function collectDrillHoles(
   primitives: KPrimitive[],

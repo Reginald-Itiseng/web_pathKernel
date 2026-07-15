@@ -2,11 +2,11 @@
  * Isolation routing: multi-pass buffered offsets around true copper geometry.
  * Port of reference/PathKernel/app/core/isolation.py `build_isolation_layer`.
  */
-import { offsetPolygons } from './clip';
+import { clipOpenPathsOutside, offsetPolygons, sweptOpenPaths, unionPolygons } from './clip';
 import { deriveIsolationToolGeometry } from './cncParams';
-import { minimumCopperGap } from './copper';
+import { collectNonPadPolygons, collectPadPolygons, minimumCopperGap } from './copper';
 import { pathLength } from './geom2d';
-import type { IsolationParams, KernelOpResult, KPoint, Stroke } from './types';
+import type { IsolationParams, KernelOpResult, KPoint, KPrimitive, Stroke } from './types';
 
 export interface IsolationInput {
   id: string;
@@ -14,6 +14,8 @@ export interface IsolationInput {
   label: string;
   toolNumber: number;
   copper: KPoint[][];
+  /** Source primitives — needed for extra pad contours (pad detection). */
+  primitives: KPrimitive[];
   params: IsolationParams;
 }
 
@@ -68,6 +70,62 @@ export function buildIsolation(input: IsolationInput): KernelOpResult {
     }
   }
 
+  // ── Extra pad contours ─────────────────────────────────────────────────
+  // Additional exterior rings around flashed pads ONLY, generated AFTER the
+  // trace passes: the swept area of every path emitted so far is a keepout,
+  // so pad contours are clipped instead of recutting existing channels.
+  // Port of the Python kernel's extra_pad_contours block.
+  const extraPadContours = Math.max(0, Math.floor(params.extraPadContours));
+  let padContourStrokes = 0;
+  if (extraPadContours > 0) {
+    const padRings = unionPolygons(collectPadPolygons(input.primitives));
+    if (padRings.length > 0) {
+      const toolRadius = Math.max(0.001, effectiveRadius);
+      const nonPadRings = unionPolygons(collectNonPadPolygons(input.primitives));
+      // Keep pad contours clear of other copper features (traces, zones).
+      const nonPadKeepout =
+        nonPadRings.length > 0
+          ? offsetPolygons(nonPadRings, Math.max(0.001, toolRadius * 0.22), params.joinStyle)
+          : [];
+      let existingSwept =
+        previewPolylines.length > 0 ? sweptOpenPaths(previewPolylines, toolRadius) : [];
+
+      const start = offsetStart + passes * step;
+      for (let i = 0; i < extraPadContours; i++) {
+        const offset = start + i * step;
+        const rings = offsetPolygons(padRings, offset, params.joinStyle);
+        let candidates: KPoint[][] = rings
+          .filter((r) => r.length >= 3)
+          .map((r) => [...r, r[0]]);
+        if (candidates.length === 0) continue;
+
+        if (existingSwept.length > 0) {
+          // Shrink the keepout slightly so boundary-touching contours are not
+          // clipped into dotted fragments by float tolerance.
+          const shrink = Math.max(0.0001, toolRadius * 0.02);
+          const keepout = offsetPolygons(existingSwept, -shrink, params.joinStyle);
+          if (keepout.length > 0) {
+            candidates = clipOpenPathsOutside(candidates, keepout);
+          }
+        }
+        if (nonPadKeepout.length > 0) {
+          candidates = clipOpenPathsOutside(candidates, nonPadKeepout);
+        }
+
+        const kept = candidates.filter((line) => line.length >= 2 && pathLength(line) > 1e-6);
+        if (kept.length === 0) continue;
+        for (const line of kept) {
+          strokes.push({ type: 'polyline', points: line });
+          previewPolylines.push(line);
+          padContourStrokes++;
+        }
+        const newSwept = sweptOpenPaths(kept, toolRadius);
+        existingSwept =
+          existingSwept.length > 0 ? unionPolygons([...existingSwept, ...newSwept]) : newSwept;
+      }
+    }
+  }
+
   if (strokes.length === 0) {
     throw new Error('Isolation produced no geometry with current parameters.');
   }
@@ -91,6 +149,7 @@ export function buildIsolation(input: IsolationInput): KernelOpResult {
     isolation_passes: String(passes),
     isolation_overlap: params.overlap.toFixed(3),
     isolation_type: params.isoType,
+    extra_pad_contours: String(extraPadContours),
   };
   if (minGap != null) meta.minimum_copper_gap_mm = minGap.toFixed(6);
   if (clearanceWarning) meta.tool_clearance_warning = clearanceWarning;
@@ -110,6 +169,7 @@ export function buildIsolation(input: IsolationInput): KernelOpResult {
       pathLengthMm: totalLength,
       strokeCount: strokes.length,
       skippedPasses,
+      padContourCount: padContourStrokes,
     },
   };
 }

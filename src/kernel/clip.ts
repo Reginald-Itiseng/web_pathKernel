@@ -218,6 +218,44 @@ export function cleanPolygons(rings: KPoint[][], epsMm: number): KPoint[][] {
 }
 
 /**
+ * Clip OPEN polylines against polygons, keeping the parts OUTSIDE
+ * (shapely `linework.difference(polygon)`). Open-path output requires
+ * Clipper's PolyTree.
+ */
+export function clipOpenPathsOutside(lines: KPoint[][], clipRings: KPoint[][]): KPoint[][] {
+  if (lines.length === 0) return [];
+  const clipData = toIntPaths(clipRings, 3);
+  if (clipData.length === 0) return lines;
+  const subjectData: IntPoint[][] = [];
+  for (const line of lines) {
+    const converted: IntPoint[] = [];
+    for (const p of line) {
+      const x = Math.round(p.x * SCALE);
+      const y = Math.round(p.y * SCALE);
+      const last = converted[converted.length - 1];
+      if (!last || last.x !== x || last.y !== y) converted.push({ x, y });
+    }
+    if (converted.length >= 2) subjectData.push(converted);
+  }
+  if (subjectData.length === 0) return [];
+  const tree = lib().clipToPolyTree({
+    clipType: clipperLib.ClipType.Difference,
+    subjectFillType: clipperLib.PolyFillType.NonZero,
+    subjectInputs: [{ data: subjectData, closed: false }],
+    clipInputs: [{ data: clipData }],
+  });
+  const out: KPoint[][] = [];
+  const visit = (node: clipperLib.PolyNode): void => {
+    for (const child of node.childs) {
+      if (child.isOpen && child.contour.length >= 2) out.push(fromIntPath(child.contour));
+      visit(child);
+    }
+  };
+  visit(tree);
+  return out;
+}
+
+/**
  * Union a ring soup and return proper polygons with hole assignment, using
  * Clipper's PolyTree (outer nodes may contain hole children, which may in
  * turn contain nested outers).

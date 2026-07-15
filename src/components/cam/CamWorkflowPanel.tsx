@@ -4,6 +4,7 @@ import { LAYER_LABELS } from '../../utils/layerUtils';
 import { deriveIsolationToolGeometry } from '../../kernel/cncParams';
 import { AUTO_STOCK_MARGIN_MM } from '../../kernel/board3d';
 import type {
+  CenteringParams,
   CutoutParams,
   DrillParams,
   IsolationParams,
@@ -12,6 +13,9 @@ import type {
   OperationRequest,
   StockSettings,
 } from '../../kernel/types';
+
+/** Synthetic key for the centering op (not tied to one layer). */
+export const CENTERING_KEY = '__centering__';
 
 /** Stock configuration held in App state. Auto → circuit bounds + margin. */
 export interface StockConfig {
@@ -70,13 +74,35 @@ export const DEFAULT_CUTOUT_PARAMS: CutoutParams = {
   holdingTabWidthMm: 1,
 };
 
+export const DEFAULT_CENTERING_PARAMS: CenteringParams = {
+  orientation: 'horizontal',
+  holeCount: 2,
+  outlineToHoleCenterMm: 12,
+  holeSpacingMm: 10,
+  holeDiameterMm: 3,
+  toolDiameterMm: 1,
+  lateralStepoverPct: 50,
+};
+
+interface OpConfigBase {
+  enabled: boolean;
+  toolNumber: number;
+  /** Mirror the generated toolpaths about the flip axis. */
+  mirror: boolean;
+  /** Show this op's toolpaths in the 2D/3D previews. */
+  overlayVisible: boolean;
+}
+
 /** Per-layer operation configuration held in App state. */
 export type OpConfig =
-  | { kind: 'isolation'; enabled: boolean; toolNumber: number; params: IsolationParams }
-  | { kind: 'drill'; enabled: boolean; toolNumber: number; params: DrillParams }
-  | { kind: 'cutout'; enabled: boolean; toolNumber: number; params: CutoutParams };
+  | (OpConfigBase & { kind: 'isolation'; params: IsolationParams })
+  | (OpConfigBase & { kind: 'drill'; params: DrillParams })
+  | (OpConfigBase & { kind: 'cutout'; params: CutoutParams })
+  | (OpConfigBase & { kind: 'centering'; params: CenteringParams });
 
 export type OpConfigMap = Record<string, OpConfig>;
+
+const CONFIG_DEFAULTS = { mirror: false, overlayVisible: true };
 
 /** Seed one op config per CAM-relevant layer, preserving existing entries. */
 export function seedOpConfigs(layers: LayerEntry[], existing: OpConfigMap): OpConfigMap {
@@ -91,6 +117,7 @@ export function seedOpConfigs(layers: LayerEntry[], existing: OpConfigMap): OpCo
         kind: 'isolation',
         enabled: true,
         toolNumber: 1,
+        ...CONFIG_DEFAULTS,
         params: { ...DEFAULT_ISOLATION_PARAMS },
       };
     } else if (layer.layerType === 'drill') {
@@ -98,6 +125,7 @@ export function seedOpConfigs(layers: LayerEntry[], existing: OpConfigMap): OpCo
         kind: 'drill',
         enabled: true,
         toolNumber: 2,
+        ...CONFIG_DEFAULTS,
         params: { ...DEFAULT_DRILL_PARAMS },
       };
     } else if (layer.layerType === 'board-outline') {
@@ -105,11 +133,32 @@ export function seedOpConfigs(layers: LayerEntry[], existing: OpConfigMap): OpCo
         kind: 'cutout',
         enabled: true,
         toolNumber: 3,
+        ...CONFIG_DEFAULTS,
         params: { ...DEFAULT_CUTOUT_PARAMS },
       };
     }
   }
+  // Double-sided boards get a centering-holes op (disabled until wanted).
+  const copperCount = layers.filter(
+    (l) => l.layerType === 'top-copper' || l.layerType === 'bottom-copper',
+  ).length;
+  if (copperCount >= 2) {
+    next[CENTERING_KEY] =
+      existing[CENTERING_KEY] ??
+      ({
+        kind: 'centering',
+        enabled: false,
+        toolNumber: 4,
+        ...CONFIG_DEFAULTS,
+        params: { ...DEFAULT_CENTERING_PARAMS },
+      } as OpConfig);
+  }
   return next;
+}
+
+/** Stable operation id for a config entry (used for overlay filtering too). */
+export function opIdFor(key: string, config: OpConfig): string {
+  return config.kind === 'centering' ? 'centering' : `${config.kind}:${key}`;
 }
 
 export function buildOperationRequests(layers: LayerEntry[], configs: OpConfigMap): OperationRequest[] {
@@ -118,21 +167,50 @@ export function buildOperationRequests(layers: LayerEntry[], configs: OpConfigMa
     const config = configs[layer.id];
     if (!config || !config.enabled || !layer.primitives) continue;
     out.push({
-      id: `${config.kind}:${layer.id}`,
+      id: opIdFor(layer.id, config),
       kind: config.kind,
       layerId: layer.id,
       toolNumber: config.toolNumber,
+      mirror: config.mirror,
       params: config.params,
     } as OperationRequest);
   }
+  const centering = configs[CENTERING_KEY];
+  if (centering && centering.kind === 'centering' && centering.enabled) {
+    // Anchor to any layer with kernel geometry (bounds come from the job).
+    const anchor =
+      layers.find((l) => l.layerType === 'board-outline' && l.primitives) ??
+      layers.find((l) => l.primitives);
+    if (anchor) {
+      out.push({
+        id: opIdFor(CENTERING_KEY, centering),
+        kind: 'centering',
+        layerId: anchor.id,
+        toolNumber: centering.toolNumber,
+        mirror: false,
+        params: centering.params,
+      });
+    }
+  }
   return out;
 }
+
+/** Machining priority: registration first, cutout last. */
+export const WORKFLOW_ORDER: Record<OpConfig['kind'] | 'top-copper' | 'bottom-copper', number> = {
+  centering: 0,
+  'top-copper': 1,
+  'bottom-copper': 2,
+  isolation: 1, // refined per layer below
+  drill: 3,
+  cutout: 4,
+};
 
 interface Props {
   layers: LayerEntry[];
   configs: OpConfigMap;
   onConfigChange: (layerId: string, config: OpConfig) => void;
   onGenerate: () => void;
+  onGenerateCentering: () => void;
   onExport: () => void;
   busy: { stage: string; pct: number } | null;
   camResult: KernelJobResult | null;
@@ -148,6 +226,7 @@ export function CamWorkflowPanel({
   configs,
   onConfigChange,
   onGenerate,
+  onGenerateCentering,
   onExport,
   busy,
   camResult,
@@ -156,22 +235,48 @@ export function CamWorkflowPanel({
   onStockChange,
   circuitSizeMm,
 }: Props) {
-  // Fixed workflow order regardless of file load order:
-  // top isolation → bottom isolation → drill → cutout.
+  // Machining priority regardless of file load order:
+  // 1 registration → 2 top iso → 3 bottom iso (mirrored) → 4 drill → 5 cutout.
   const OP_ORDER: Partial<Record<LayerEntry['layerType'], number>> = {
-    'top-copper': 0,
-    'bottom-copper': 1,
-    drill: 2,
-    'board-outline': 3,
+    'top-copper': 1,
+    'bottom-copper': 2,
+    drill: 3,
+    'board-outline': 4,
   };
   const camLayers = layers
     .filter((l) => configs[l.id])
     .sort((a, b) => (OP_ORDER[a.layerType] ?? 9) - (OP_ORDER[b.layerType] ?? 9));
-  if (camLayers.length === 0) return null;
+  const centeringConfig = configs[CENTERING_KEY];
+  if (camLayers.length === 0 && !centeringConfig) return null;
 
   const resultsByOpId = new Map<string, KernelOpResult>(
     (camResult?.operations ?? []).map((op) => [op.id, op]),
   );
+  const centeringResult = centeringConfig
+    ? resultsByOpId.get(opIdFor(CENTERING_KEY, centeringConfig)) ?? null
+    : null;
+
+  const cards: React.ReactNode[] = [];
+  let step = 2;
+  for (const layer of camLayers) {
+    const config = configs[layer.id];
+    const title =
+      config.kind === 'isolation' ? 'Isolation' : config.kind === 'drill' ? 'Drill' : 'Cutout';
+    cards.push(
+      <OperationCard
+        key={layer.id}
+        step={centeringConfig ? step++ : step++ - 1}
+        title={title}
+        subtitle={`${LAYER_LABELS[layer.layerType]} · ${layer.file.name}`}
+        config={config}
+        result={resultsByOpId.get(opIdFor(layer.id, config)) ?? null}
+        stale={camStale}
+        // Mirroring belongs to the bottom side only — the top is milled as-is.
+        showMirror={config.kind === 'isolation' && layer.layerType === 'bottom-copper'}
+        onChange={(next) => onConfigChange(layer.id, next)}
+      />,
+    );
+  }
 
   return (
     <div className="flex flex-col gap-2">
@@ -180,23 +285,41 @@ export function CamWorkflowPanel({
       </h3>
       <StockPanel stock={stock} onChange={onStockChange} circuitSizeMm={circuitSizeMm} />
 
+      {centeringConfig && (
+        <>
+          <h3 className="text-xs font-semibold uppercase tracking-widest text-zinc-500 mt-1">
+            1 · Registration
+          </h3>
+          <OperationCard
+            key={CENTERING_KEY}
+            step={1}
+            title="Centering"
+            subtitle="Registration holes on the flip axis"
+            config={centeringConfig}
+            result={centeringResult}
+            stale={camStale}
+            showMirror={false}
+            hideEnable
+            onChange={(next) => onConfigChange(CENTERING_KEY, next)}
+          />
+          <button
+            onClick={onGenerateCentering}
+            disabled={busy != null}
+            className="w-full px-3 py-1.5 text-sm font-medium text-zinc-900 bg-sky-400 hover:bg-sky-300 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {centeringResult ? 'Regenerate centering holes' : 'Drill centering holes'}
+          </button>
+          <p className="text-[11px] text-zinc-600 -mt-1">
+            Drill these first, pin the stock, then machine the sides.
+          </p>
+        </>
+      )}
+
       <h3 className="text-xs font-semibold uppercase tracking-widest text-zinc-500 mt-1">
-        Operations
+        {centeringConfig ? 'Machining steps' : 'Operations'}
       </h3>
 
-      {camLayers.map((layer) => {
-        const config = configs[layer.id];
-        return (
-          <OperationCard
-            key={layer.id}
-            layer={layer}
-            config={config}
-            result={resultsByOpId.get(`${config.kind}:${layer.id}`) ?? null}
-            stale={camStale}
-            onChange={(next) => onConfigChange(layer.id, next)}
-          />
-        );
-      })}
+      {cards}
 
       <button
         onClick={onGenerate}
@@ -223,7 +346,7 @@ export function CamWorkflowPanel({
           disabled={busy != null || camStale}
           className="w-full px-3 py-2 text-sm font-medium text-zinc-900 bg-green-400 hover:bg-green-300 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
         >
-          Export HPGL
+          Export HPGL ({camResult.operations.length} file{camResult.operations.length !== 1 ? 's' : ''})
         </button>
       )}
     </div>
@@ -293,39 +416,63 @@ function StockPanel({
   );
 }
 
+const KIND_COLORS: Record<OpConfig['kind'], string> = {
+  isolation: 'text-fuchsia-300',
+  drill: 'text-cyan-300',
+  cutout: 'text-green-300',
+  centering: 'text-sky-300',
+};
+
 function OperationCard({
-  layer,
+  step,
+  title,
+  subtitle,
   config,
   result,
   stale,
+  showMirror,
+  hideEnable,
   onChange,
 }: {
-  layer: LayerEntry;
+  step: number;
+  title: string;
+  subtitle: string;
   config: OpConfig;
   result: KernelOpResult | null;
   stale: boolean;
+  showMirror: boolean;
+  hideEnable?: boolean;
   onChange: (config: OpConfig) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const kindLabel =
-    config.kind === 'isolation' ? 'Isolation' : config.kind === 'drill' ? 'Drill' : 'Cutout';
-  const kindColor =
-    config.kind === 'isolation' ? 'text-fuchsia-300' : config.kind === 'drill' ? 'text-cyan-300' : 'text-green-300';
 
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900/60">
       <div className="flex items-center gap-2 px-3 py-2">
-        <input
-          type="checkbox"
-          checked={config.enabled}
-          onChange={(e) => onChange({ ...config, enabled: e.target.checked } as OpConfig)}
-          className="accent-cyan-400"
-        />
+        <span className="w-4 h-4 shrink-0 rounded-full bg-zinc-800 text-zinc-400 text-[10px] font-mono flex items-center justify-center">
+          {step}
+        </span>
+        {!hideEnable && (
+          <input
+            type="checkbox"
+            checked={config.enabled}
+            onChange={(e) => onChange({ ...config, enabled: e.target.checked } as OpConfig)}
+            className="accent-cyan-400"
+          />
+        )}
         <button className="flex-1 min-w-0 text-left" onClick={() => setOpen(!open)}>
-          <span className={`text-xs font-medium ${kindColor}`}>{kindLabel}</span>
-          <span className="text-xs text-zinc-500 ml-1.5 truncate">
-            {LAYER_LABELS[layer.layerType]} · {layer.file.name}
-          </span>
+          <span className={`text-xs font-medium ${KIND_COLORS[config.kind]}`}>{title}</span>
+          <span className="text-xs text-zinc-500 ml-1.5 truncate">{subtitle}</span>
+          {config.mirror && (
+            <span className="ml-1.5 px-1 rounded bg-sky-950 text-[10px] text-sky-300">mirrored</span>
+          )}
+        </button>
+        <button
+          onClick={() => onChange({ ...config, overlayVisible: !config.overlayVisible } as OpConfig)}
+          title={config.overlayVisible ? 'Hide toolpaths in previews' : 'Show toolpaths in previews'}
+          className={`text-xs px-1 ${config.overlayVisible ? 'text-zinc-300' : 'text-zinc-600'}`}
+        >
+          {config.overlayVisible ? '👁' : '–'}
         </button>
         <span className="text-xs text-zinc-600">{open ? '▾' : '▸'}</span>
       </div>
@@ -350,6 +497,19 @@ function OperationCard({
               onChange={(params) => onChange({ ...config, params })}
             />
           )}
+          {config.kind === 'centering' && (
+            <CenteringParamsForm
+              params={config.params}
+              onChange={(params) => onChange({ ...config, params })}
+            />
+          )}
+          {showMirror && (
+            <CheckboxField
+              label="Mirror at export (flip about registration axis)"
+              checked={config.mirror}
+              onChange={(mirror) => onChange({ ...config, mirror } as OpConfig)}
+            />
+          )}
           <NumberField
             label="Tool #"
             value={config.toolNumber}
@@ -369,6 +529,9 @@ function OperationCard({
             <Chip>{result.stats.borePassCount} bores</Chip>
           )}
           {result.stats.loopCount != null && <Chip>{result.stats.loopCount} loop(s)</Chip>}
+          {(result.stats.padContourCount ?? 0) > 0 && (
+            <Chip>{result.stats.padContourCount} pad contours</Chip>
+          )}
           {(result.stats.skippedSmallHoles ?? 0) > 0 && (
             <Chip tone="warn">{result.stats.skippedSmallHoles} skipped</Chip>
           )}
@@ -425,6 +588,14 @@ function IsolationParamsForm({
         onChange={(v) => onChange({ ...params, isoType: v as IsolationParams['isoType'] })}
       />
       <NumberField label="Trace margin (mm)" value={params.traceMarginMm} step={0.01} min={0} onChange={(v) => onChange({ ...params, traceMarginMm: v })} />
+      <NumberField
+        label="Pad contours (extra)"
+        value={params.extraPadContours}
+        step={1}
+        min={0}
+        max={8}
+        onChange={(v) => onChange({ ...params, extraPadContours: Math.max(0, Math.round(v)) })}
+      />
       <CheckboxField
         label="Skip passes tighter than copper gap"
         checked={params.skipTightClearancePaths}
@@ -432,6 +603,39 @@ function IsolationParamsForm({
       />
       <p className="text-[11px] text-zinc-500 font-mono mt-0.5">
         D<sub>eff</sub> {tool.effectiveDiameterMm.toFixed(3)} mm · step {tool.hatchingMarginMm.toFixed(3)} mm
+      </p>
+    </div>
+  );
+}
+
+function CenteringParamsForm({
+  params,
+  onChange,
+}: {
+  params: CenteringParams;
+  onChange: (params: CenteringParams) => void;
+}) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <SelectField
+        label="Flip axis"
+        value={params.orientation}
+        options={[
+          { value: 'horizontal', label: 'Horizontal (holes left/right)' },
+          { value: 'vertical', label: 'Vertical (holes top/bottom)' },
+        ]}
+        onChange={(v) => onChange({ ...params, orientation: v as CenteringParams['orientation'] })}
+      />
+      <NumberField label="Holes (2–4)" value={params.holeCount} step={1} min={2} max={4} onChange={(v) => onChange({ ...params, holeCount: Math.max(2, Math.min(4, Math.round(v))) })} />
+      <NumberField label="Outline → hole (mm)" value={params.outlineToHoleCenterMm} step={1} min={2} onChange={(v) => onChange({ ...params, outlineToHoleCenterMm: v })} />
+      {params.holeCount > 2 && (
+        <NumberField label="Extra hole spacing (mm)" value={params.holeSpacingMm} step={1} min={2} onChange={(v) => onChange({ ...params, holeSpacingMm: v })} />
+      )}
+      <NumberField label="Hole Ø (mm)" value={params.holeDiameterMm} step={0.1} min={0.5} onChange={(v) => onChange({ ...params, holeDiameterMm: v })} />
+      <NumberField label="Tool Ø (mm)" value={params.toolDiameterMm} step={0.1} min={0.1} onChange={(v) => onChange({ ...params, toolDiameterMm: v })} />
+      <NumberField label="Stepover (% radius)" value={params.lateralStepoverPct} step={5} min={1} max={100} onChange={(v) => onChange({ ...params, lateralStepoverPct: v })} />
+      <p className="text-[11px] text-zinc-500">
+        All holes sit on the flip axis outside the board — drill through board AND spoilboard, pin, flip about the axis.
       </p>
     </div>
   );

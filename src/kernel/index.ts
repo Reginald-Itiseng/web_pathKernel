@@ -3,11 +3,13 @@
  * inside the web worker identically. `initClipper()` must be awaited first
  * (runKernelJob does it defensively).
  */
-import { buildBoard3DModel } from './board3d';
+import { buildBoard3DModel, resolveStockRect } from './board3d';
+import { buildCenteringHoles, centeringHoleCenters, centeringMirrorAxis } from './centering';
 import { initClipper } from './clip';
 import { buildCopperGeometry, collectDrillHoles, minimumCopperGap } from './copper';
-import { buildCutout } from './cutout';
+import { buildCutout, extractCutoutLoops } from './cutout';
 import { buildDrillToolpaths } from './drilling';
+import { mergeBounds, ringBounds } from './geom2d';
 import { buildIsolation } from './isolation';
 import type {
   KernelJobInput,
@@ -15,6 +17,7 @@ import type {
   KernelOpResult,
   KernelProgress,
   KPoint,
+  MirrorAxis,
 } from './types';
 
 export type { KernelJobInput, KernelJobResult } from './types';
@@ -42,6 +45,24 @@ export async function runKernelJob(
     }
   }
 
+  // Board bounds: real outline loops when available, else union layer bounds.
+  const boardBounds = computeBoardBounds(input);
+
+  // Mirror axis: centering op axis when one is requested, else the vertical
+  // centerline of the board (common left↔right flip).
+  let mirrorAxis: MirrorAxis | null = null;
+  const centeringRequest = input.operations.find((op) => op.kind === 'centering');
+  if (boardBounds) {
+    mirrorAxis = centeringRequest
+      ? centeringMirrorAxis(boardBounds, centeringRequest.params.orientation)
+      : { axis: 'x', position: (boardBounds[0] + boardBounds[2]) / 2 };
+  }
+  if (input.operations.some((op) => op.mirror) && !centeringRequest) {
+    warnings.push(
+      'Mirrored toolpaths without centering holes: alignment reference is the board centerline only.',
+    );
+  }
+
   const operations: KernelOpResult[] = [];
   const total = Math.max(1, input.operations.length);
   for (let i = 0; i < input.operations.length; i++) {
@@ -60,6 +81,7 @@ export async function runKernelJob(
             label: `Isolation — ${request.layerId}`,
             toolNumber: request.toolNumber,
             copper,
+            primitives: layer.primitives,
             params: request.params,
           }),
         );
@@ -72,6 +94,19 @@ export async function runKernelJob(
             label: `Drill — ${request.layerId}`,
             toolNumber: request.toolNumber,
             holes: collectDrillHoles(layer.primitives),
+            params: request.params,
+          }),
+        );
+      } else if (request.kind === 'centering') {
+        report('Centering holes', pctBase);
+        if (!boardBounds) throw new Error('No board bounds available for centering holes.');
+        operations.push(
+          buildCenteringHoles({
+            id: request.id,
+            layerId: request.layerId,
+            label: 'Centering holes',
+            toolNumber: request.toolNumber,
+            boardBounds,
             params: request.params,
           }),
         );
@@ -88,8 +123,36 @@ export async function runKernelJob(
           }),
         );
       }
+
+      // Mark for export-time mirroring: previews stay artwork-aligned so the
+      // GUI reads cleanly; the exporter flips the strokes about the axis.
+      if (request.mirror && mirrorAxis) {
+        const op = operations[operations.length - 1];
+        if (op && op.id === request.id) {
+          op.mirror = true;
+          op.meta.mirrored_at_export = `about ${mirrorAxis.axis}=${mirrorAxis.position.toFixed(4)}`;
+        }
+      }
     } catch (err) {
       warnings.push(`${request.kind} on ${request.layerId} failed: ${message(err)}`);
+    }
+  }
+
+  // Warn when centering holes fall outside the stock panel.
+  if (centeringRequest && boardBounds) {
+    const rect = resolveStockRect(boardBounds, input.stock);
+    const holeR = Math.max(0.001, centeringRequest.params.holeDiameterMm / 2);
+    const outside = centeringHoleCenters(boardBounds, centeringRequest.params).some(
+      (c) =>
+        c.x - holeR < rect.minX ||
+        c.x + holeR > rect.minX + rect.width ||
+        c.y - holeR < rect.minY ||
+        c.y + holeR > rect.minY + rect.height,
+    );
+    if (outside) {
+      warnings.push(
+        'Centering holes fall outside the stock panel — increase the stock size or reduce the outline-to-hole distance.',
+      );
     }
   }
 
@@ -108,7 +171,24 @@ export async function runKernelJob(
   }
 
   report('Done', 1);
-  return { operations, board3d, minimumCopperGapMm: minGap, warnings };
+  return { operations, board3d, minimumCopperGapMm: minGap, mirrorAxis, warnings };
+}
+
+function computeBoardBounds(input: KernelJobInput): [number, number, number, number] | null {
+  const outlineLayer = input.layers.find((l) => l.role === 'board-outline');
+  if (outlineLayer) {
+    try {
+      const loops = extractCutoutLoops(outlineLayer.primitives);
+      let out: [number, number, number, number] | null = null;
+      for (const loop of loops) out = mergeBounds(out, ringBounds(loop));
+      if (out) return out;
+    } catch {
+      // fall through to union bounds
+    }
+  }
+  let out: [number, number, number, number] | null = null;
+  for (const layer of input.layers) out = mergeBounds(out, layer.bounds);
+  return out;
 }
 
 function message(err: unknown): string {

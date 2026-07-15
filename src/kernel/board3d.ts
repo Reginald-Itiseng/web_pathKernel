@@ -96,6 +96,22 @@ export function buildBoard3DModel(inputs: Board3DInputs): Board3DModel {
       if (hole.diameter > 0) drillRings.push(circlePoints(hole.x, hole.y, hole.diameter / 2));
     }
   }
+  // Centering (registration) holes are through-holes too: recover the hole
+  // centers from the ε-plunge lines and punch at the requested hole diameter.
+  for (const op of opResults) {
+    if (op.kind !== 'centering') continue;
+    const holeDia = Math.max(
+      parseFloat(op.meta.centering_hole_diameter_mm ?? '0') || 0,
+      op.effectiveToolDiameterMm,
+    );
+    if (holeDia <= 0) continue;
+    for (const stroke of op.strokes) {
+      if (stroke.type !== 'line') continue;
+      if (Math.hypot(stroke.end.x - stroke.start.x, stroke.end.y - stroke.start.y) > 0.01) continue;
+      drillRings.push(circlePoints(stroke.start.x, stroke.start.y, holeDia / 2));
+    }
+  }
+
   const drillUnion = drillRings.length > 0 ? unionPolygons(drillRings) : [];
 
   // Cutout channels cut through the whole stack (substrate + both clads).

@@ -7,7 +7,8 @@
  * exporter): normalize-to-origin shift, NO Y inversion, 40 units/mm.
  */
 import { flattenStroke, pointsClose } from './geom2d';
-import type { KernelOpResult, KPoint, Stroke } from './types';
+import { mirrorStroke } from './mirror';
+import type { KernelOpResult, KPoint, MirrorAxis, Stroke } from './types';
 
 const EPS = 1e-9;
 
@@ -20,6 +21,11 @@ export interface HpglOptions {
    * coordinates = circuit coordinates − this point.
    */
   absoluteOriginMm?: { x: number; y: number };
+  /**
+   * Flip axis for ops flagged `mirror` (bottom side / single-sided-from-back).
+   * Applied here at export so GUI previews stay artwork-aligned.
+   */
+  mirrorAxis?: MirrorAxis | null;
   stitchToleranceMm: number;
   pdBatchPairs: number;
   /** Optional per-operation speeds keyed by operation id (mm/min). */
@@ -51,9 +57,17 @@ export function exportHpgl(
   const scale = Math.max(1e-9, opts.unitsPerMm);
   const batchPairs = Math.max(1, Math.floor(opts.pdBatchPairs));
 
-  const withStrokes = operations.filter((op) => op.strokes.length > 0);
+  let withStrokes = operations.filter((op) => op.strokes.length > 0);
   if (withStrokes.length === 0) {
     throw new Error('No toolpaths to export.');
+  }
+
+  // Export-time mirroring for flagged ops (previews stay artwork-aligned).
+  const axis = opts.mirrorAxis;
+  if (axis) {
+    withStrokes = withStrokes.map((op) =>
+      op.mirror ? { ...op, strokes: op.strokes.map((s) => mirrorStroke(s, axis)) } : op,
+    );
   }
 
   // Global shift: explicit machine origin, or normalize-to-toolpath-minimum.

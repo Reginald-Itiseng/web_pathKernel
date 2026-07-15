@@ -106,12 +106,47 @@ export interface CutoutParams {
   holdingTabWidthMm: number;
 }
 
-export type OperationKind = 'isolation' | 'drill' | 'cutout';
+export type OperationKind = 'isolation' | 'drill' | 'cutout' | 'centering';
+
+export type CenteringOrientation = 'horizontal' | 'vertical';
+
+/**
+ * Registration (centering) holes for double-sided milling. All holes lie ON
+ * the flip axis, outside the board outline, so flipping the stock about the
+ * axis through the holes registers the two sides exactly.
+ */
+export interface CenteringParams {
+  orientation: CenteringOrientation;
+  /** 2..4 — extras are placed further out along the axis. */
+  holeCount: number;
+  outlineToHoleCenterMm: number;
+  /** Spacing between stacked holes on the same side (holes 3-4). */
+  holeSpacingMm: number;
+  holeDiameterMm: number;
+  toolDiameterMm: number;
+  lateralStepoverPct: number;
+}
+
+/** A mirror line in circuit coordinates. */
+export interface MirrorAxis {
+  /** 'x' = vertical line x=position (left/right flip); 'y' = horizontal line. */
+  axis: 'x' | 'y';
+  position: number;
+}
+
+interface OpRequestBase {
+  id: string;
+  layerId: string;
+  toolNumber: number;
+  /** Reflect the generated toolpaths about the job's mirror axis. */
+  mirror?: boolean;
+}
 
 export type OperationRequest =
-  | { id: string; kind: 'isolation'; layerId: string; params: IsolationParams; toolNumber: number }
-  | { id: string; kind: 'drill'; layerId: string; params: DrillParams; toolNumber: number }
-  | { id: string; kind: 'cutout'; layerId: string; params: CutoutParams; toolNumber: number };
+  | (OpRequestBase & { kind: 'isolation'; params: IsolationParams })
+  | (OpRequestBase & { kind: 'drill'; params: DrillParams })
+  | (OpRequestBase & { kind: 'cutout'; params: CutoutParams })
+  | (OpRequestBase & { kind: 'centering'; params: CenteringParams });
 
 export interface KernelOpStats {
   pathLengthMm: number;
@@ -123,6 +158,7 @@ export interface KernelOpStats {
   oversizedHoles?: number;
   loopCount?: number;
   skippedPasses?: number;
+  padContourCount?: number;
 }
 
 export interface KernelOpResult {
@@ -131,6 +167,9 @@ export interface KernelOpResult {
   layerId: string;
   label: string;
   toolNumber: number;
+  /** Mirror this op's strokes about the job's mirror axis AT EXPORT TIME.
+      Previews stay artwork-aligned; the machine output is flipped. */
+  mirror?: boolean;
   effectiveToolDiameterMm: number;
   /** Exact geometry for export — arcs preserved. */
   strokes: Stroke[];
@@ -195,6 +234,8 @@ export interface KernelJobResult {
   operations: KernelOpResult[];
   board3d: Board3DModel;
   minimumCopperGapMm: number | null;
+  /** Axis used for mirrored operations (centering axis or bbox centerline). */
+  mirrorAxis: MirrorAxis | null;
   warnings: string[];
 }
 
