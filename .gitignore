@@ -3,3 +3,6 @@ dist/
 .env
 .env.local
 *.local
+
+# Reference Python path kernel (read-only benchmark source)
+reference/

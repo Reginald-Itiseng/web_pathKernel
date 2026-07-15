@@ -1,16 +1,26 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { GerberDropzone } from './components/GerberDropzone';
 import { GerberPreview } from './components/GerberPreview';
 import { LayerInfo } from './components/LayerInfo';
+import { ToastStack, type Toast } from './components/ToastStack';
+import { ValidationBadge } from './components/ValidationBadge';
+import {
+  buildOperationRequests,
+  DEFAULT_STOCK_CONFIG,
+  resolveStockSettings,
+  seedOpConfigs,
+  type OpConfig,
+  type OpConfigMap,
+  type StockConfig,
+} from './components/cam/CamWorkflowPanel';
+import { AUTO_STOCK_MARGIN_MM } from './kernel/board3d';
 import { parseGerber, type LayerEntry } from './utils/gerberUtils';
 import { LAYER_COLORS, detectLayerType } from './utils/layerUtils';
-import {
-  buildCamJob,
-  buildImportReport,
-  DEFAULT_DRILL_SETTINGS,
-  DEFAULT_HPGL_SETTINGS,
-  exportHpgl,
-} from './utils/camUtils';
+import { buildCamJob, buildImportReport, DEFAULT_DRILL_SETTINGS } from './utils/camUtils';
+import { buildKernelLayers, ingestLayerPrimitives } from './utils/kernelBridge';
+import { runKernelJobInWorker } from './workers/kernelClient';
+import { exportHpgl } from './kernel/hpgl';
+import type { Board3DModel, KernelJobResult, KernelProgress } from './kernel/types';
 import {
   addPathIds,
   editHoleDiameter,
@@ -40,6 +50,23 @@ export default function App() {
   const [state, setState] = useState<AppState>(INITIAL);
   const [geometryHighlight, setGeometryHighlight] = useState<GeometryHighlightTarget | null>(null);
 
+  // ── CAM kernel state ───────────────────────────────────────────────────────
+  const [opConfigs, setOpConfigs] = useState<OpConfigMap>({});
+  const [stockConfig, setStockConfig] = useState<StockConfig>(DEFAULT_STOCK_CONFIG);
+  const [camResult, setCamResult] = useState<KernelJobResult | null>(null);
+  const [camStale, setCamStale] = useState(false);
+  const [kernelBusy, setKernelBusy] = useState<KernelProgress | null>(null);
+  const [boardModel, setBoardModel] = useState<Board3DModel | null>(null);
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const toastIdRef = useRef(1);
+
+  const pushToast = useCallback((tone: Toast['tone'], message: string) => {
+    setToasts((prev) => [...prev.slice(-4), { id: toastIdRef.current++, tone, message }]);
+  }, []);
+  const dismissToast = useCallback((id: number) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
   const commitLayers = useCallback((updater: (layers: LayerEntry[]) => LayerEntry[]) => {
     setState((s) => ({
       ...s,
@@ -47,6 +74,7 @@ export default function App() {
       past: [...s.past, s.layers],
       future: [],
     }));
+    setCamStale(true);
   }, []);
 
   const createLayer = useCallback(async (file: File, content: string): Promise<LayerEntry> => {
@@ -61,6 +89,9 @@ export default function App() {
     const geometry = extractLayerGeometry(svgString, id, layerType, result.units);
     const importReport = buildImportReport(file, content, layerType, parserFiletype, enriched, geometry, drillSettings);
 
+    const ingest = ingestLayerPrimitives(content, id, layerType, geometry, svgString, result.units);
+    importReport.warnings.push(...ingest.warnings);
+
     return {
       id,
       file,
@@ -72,6 +103,7 @@ export default function App() {
       geometry,
       importReport,
       drillSettings,
+      primitives: ingest.primitives,
     };
   }, []);
 
@@ -102,6 +134,7 @@ export default function App() {
       past: newLayers.length ? [...s.past, s.layers] : s.past,
       future: newLayers.length ? [] : s.future,
     }));
+    if (newLayers.length) setCamStale(true);
   }, [createLayer]);
 
   const rebuildEditedLayer = useCallback((
@@ -119,12 +152,19 @@ export default function App() {
       geometry,
       layer.drillSettings,
     );
+    // NOTE: SVG edits (pad resize etc.) do not flow into kernel primitives —
+    // the kernel keeps working from the original file geometry. The stale
+    // badge tells the user toolpaths no longer match the edited preview.
     return { ...layer, result, geometry, importReport };
   }, []);
 
   const toggleLayer = useCallback((id: string) => {
-    commitLayers((layers) => layers.map((l) => l.id === id ? { ...l, visible: !l.visible } : l));
-  }, [commitLayers]);
+    // Visibility only affects the preview — not CAM state.
+    setState((s) => ({
+      ...s,
+      layers: s.layers.map((l) => l.id === id ? { ...l, visible: !l.visible } : l),
+    }));
+  }, []);
 
   const removeLayer = useCallback((id: string) => {
     commitLayers((layers) => layers.filter((l) => l.id !== id));
@@ -139,6 +179,10 @@ export default function App() {
       ...INITIAL,
       past: s.layers.length ? [...s.past, s.layers] : s.past,
     }));
+    setCamResult(null);
+    setBoardModel(null);
+    setOpConfigs({});
+    setCamStale(false);
   }, []);
 
   const undo = useCallback(() => {
@@ -147,6 +191,7 @@ export default function App() {
       if (!previous) return s;
       return { ...s, layers: previous, past: s.past.slice(0, -1), future: [s.layers, ...s.future] };
     });
+    setCamStale(true);
   }, []);
 
   const redo = useCallback(() => {
@@ -155,6 +200,7 @@ export default function App() {
       if (!next) return s;
       return { ...s, layers: next, past: [...s.past, s.layers], future: s.future.slice(1) };
     });
+    setCamStale(true);
   }, []);
 
   const updatePadSize = useCallback((layerId: string, defId: string, newDiameterMm: number) => {
@@ -192,8 +238,10 @@ export default function App() {
       const enriched = { ...result, svgString };
       const geometry = extractLayerGeometry(svgString, layer.id, layer.layerType, result.units);
       const importReport = buildImportReport(layer.file, layer.sourceContent, layer.layerType, 'drill', enriched, geometry, settings);
+      const ingest = ingestLayerPrimitives(layer.sourceContent, layer.id, layer.layerType, geometry, svgString, result.units);
+      importReport.warnings.push(...ingest.warnings);
       commitLayers((layers) => layers.map((l) => l.id === layerId
-        ? { ...l, result: enriched, geometry, importReport, drillSettings: settings }
+        ? { ...l, result: enriched, geometry, importReport, drillSettings: settings, primitives: ingest.primitives }
         : l));
     } catch (err) {
       setState((s) => ({
@@ -205,16 +253,123 @@ export default function App() {
 
   const camJob = useMemo(() => buildCamJob(state.layers), [state.layers]);
 
-  const exportGenericHpgl = useCallback(() => {
-    const hpgl = exportHpgl(camJob.operations, camJob.boardBounds, DEFAULT_HPGL_SETTINGS);
-    const blob = new Blob([hpgl], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = 'pcb-cam-v1.hpgl';
-    link.click();
-    URL.revokeObjectURL(url);
-  }, [camJob]);
+  // ── Kernel wiring ──────────────────────────────────────────────────────────
+
+  // Keep op configs seeded for CAM-relevant layers.
+  useEffect(() => {
+    setOpConfigs((prev) => seedOpConfigs(state.layers, prev));
+  }, [state.layers]);
+
+  const setOpConfig = useCallback((layerId: string, config: OpConfig) => {
+    setOpConfigs((prev) => ({ ...prev, [layerId]: config }));
+    setCamStale(true);
+  }, []);
+
+  const updateStockConfig = useCallback((next: StockConfig) => {
+    setStockConfig(next);
+    setCamStale(true);
+  }, []);
+
+  const circuitSizeMm = useMemo(() => {
+    if (!camJob.boardBounds) return null;
+    return { width: camJob.boardBounds[2] / 1000, height: camJob.boardBounds[3] / 1000 };
+  }, [camJob.boardBounds]);
+
+  // Import-time 3D preview: run a no-operations job so the 3D tab shows real
+  // copper on the real board outline before any toolpaths are generated.
+  const layerPrimitivesKey = useMemo(
+    () => state.layers.map((l) => `${l.id}:${l.primitives ? l.primitives.primitives.length : 0}`).join('|'),
+    [state.layers],
+  );
+  useEffect(() => {
+    const kernelLayers = buildKernelLayers(state.layers);
+    if (kernelLayers.length === 0) {
+      setBoardModel(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      runKernelJobInWorker({
+        layers: kernelLayers,
+        operations: [],
+        stock: resolveStockSettings(stockConfig),
+      })
+        .then((result) => {
+          if (!cancelled) setBoardModel(result.board3d);
+        })
+        .catch(() => {
+          /* preview only — generation reports real errors */
+        });
+    }, 300);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [layerPrimitivesKey, stockConfig]);
+
+  const generateToolpaths = useCallback(async () => {
+    const kernelLayers = buildKernelLayers(state.layers);
+    const operations = buildOperationRequests(state.layers, opConfigs);
+    if (kernelLayers.length === 0 || operations.length === 0) {
+      pushToast('warn', 'No CAM-capable layers/operations available to generate.');
+      return;
+    }
+    if (!stockConfig.auto && circuitSizeMm) {
+      const fitsX = circuitSizeMm.width + stockConfig.offsetXMm <= stockConfig.widthMm + 1e-9;
+      const fitsY = circuitSizeMm.height + stockConfig.offsetYMm <= stockConfig.heightMm + 1e-9;
+      if (!fitsX || !fitsY) {
+        pushToast('warn', 'Circuit does not fit on the configured stock at this offset — adjust the stock settings.');
+      }
+    }
+    setKernelBusy({ stage: 'Starting', pct: 0 });
+    try {
+      const result = await runKernelJobInWorker(
+        { layers: kernelLayers, operations, stock: resolveStockSettings(stockConfig) },
+        (progress) => setKernelBusy(progress),
+      );
+      setCamResult(result);
+      setBoardModel(result.board3d);
+      setCamStale(false);
+      const allWarnings = [
+        ...result.warnings,
+        ...result.operations.flatMap((op) => op.warnings.map((w) => `${op.label}: ${w}`)),
+      ];
+      for (const warning of allWarnings.slice(0, 5)) pushToast('warn', warning);
+      if (allWarnings.length === 0) {
+        pushToast('info', `Generated ${result.operations.length} toolpath operation(s).`);
+      }
+    } catch (err) {
+      pushToast('error', `Toolpath generation failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setKernelBusy(null);
+    }
+  }, [state.layers, opConfigs, stockConfig, circuitSizeMm, pushToast]);
+
+  const exportKernelHpgl = useCallback(() => {
+    if (!camResult || camResult.operations.length === 0) return;
+    try {
+      // Machine origin = stock bottom-left corner (circuit coords minus the
+      // configured placement offset).
+      const offsetX = stockConfig.auto ? AUTO_STOCK_MARGIN_MM : stockConfig.offsetXMm;
+      const offsetY = stockConfig.auto ? AUTO_STOCK_MARGIN_MM : stockConfig.offsetYMm;
+      const circuitMin = camJob.boardBounds
+        ? { x: camJob.boardBounds[0] / 1000, y: camJob.boardBounds[1] / 1000 }
+        : { x: 0, y: 0 };
+      const { text } = exportHpgl(camResult.operations, {
+        absoluteOriginMm: { x: circuitMin.x - offsetX, y: circuitMin.y - offsetY },
+      });
+      const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'pathkernel-job.hpgl';
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      pushToast('error', `HPGL export failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, [camResult, stockConfig, camJob.boardBounds, pushToast]);
 
   const { layers, parsing, errors } = state;
   const hasLayers = layers.length > 0 || parsing || errors.length > 0;
@@ -226,13 +381,16 @@ export default function App() {
           <PcbIcon className="w-5 h-5 text-green-400" />
           <span className="font-semibold text-zinc-100 tracking-tight">PCB Mill CAM</span>
         </div>
-        <span className="px-2 py-0.5 rounded-full bg-zinc-800 border border-zinc-700 text-xs text-zinc-400">
-          Robust CAM V1
-        </span>
+        {hasLayers && <ValidationBadge issues={camJob.validationIssues} />}
         <div className="ml-auto flex items-center gap-1">
           <HeaderButton onClick={undo} disabled={state.past.length === 0}>Undo</HeaderButton>
           <HeaderButton onClick={redo} disabled={state.future.length === 0}>Redo</HeaderButton>
-          <HeaderButton onClick={exportGenericHpgl} disabled={camJob.operations.length === 0}>Export HPGL</HeaderButton>
+          <HeaderButton
+            onClick={exportKernelHpgl}
+            disabled={!camResult || camResult.operations.length === 0 || camStale}
+          >
+            Export HPGL
+          </HeaderButton>
         </div>
       </header>
 
@@ -243,7 +401,6 @@ export default function App() {
               layers={layers}
               parsing={parsing}
               errors={errors}
-              camJob={camJob}
               onToggle={toggleLayer}
               onRemove={removeLayer}
               onAddFiles={handleFiles}
@@ -254,6 +411,16 @@ export default function App() {
               onHoleDiameterChange={updateHoleDiameter}
               onGeometryHighlight={setGeometryHighlight}
               onDrillSettingsChange={updateDrillSettings}
+              opConfigs={opConfigs}
+              onOpConfigChange={setOpConfig}
+              onGenerate={generateToolpaths}
+              onExport={exportKernelHpgl}
+              kernelBusy={kernelBusy}
+              camResult={camResult}
+              camStale={camStale}
+              stock={stockConfig}
+              onStockChange={updateStockConfig}
+              circuitSizeMm={circuitSizeMm}
             />
           </div>
         )}
@@ -269,12 +436,16 @@ export default function App() {
               onSingleTraceWidthChange={updateSingleTrace}
               onHoleDiameterChange={updateHoleDiameter}
               geometryHighlight={geometryHighlight}
+              camResult={camResult}
+              boardModel={boardModel}
             />
           ) : (
             <GerberDropzone onFiles={handleFiles} />
           )}
         </main>
       </div>
+
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
     </div>
   );
 }

@@ -1,6 +1,7 @@
 import gerberToSvg from 'gerber-to-svg';
 import type { LayerType } from './layerUtils';
 import type { DrillParseSettings, ImportReport, LayerGeometry } from '../types/geometry';
+import type { LayerPrimitives } from '../kernel/types';
 
 export interface ParseResult {
   svgString: string;
@@ -24,6 +25,8 @@ export interface LayerEntry {
   drillSettings?: DrillParseSettings;
   /** Populated after parsing via extractLayerGeometry; undefined until then. */
   geometry?: LayerGeometry;
+  /** Kernel primitive geometry (tracespace or SVG fallback); undefined if ingest failed. */
+  primitives?: LayerPrimitives;
 }
 
 export function parseGerber(

@@ -1,15 +1,21 @@
 import React, { useRef, useState } from 'react';
 import type { LayerEntry } from '../utils/gerberUtils';
-import type { CamJob, DrillParseSettings, GeometryHighlightTarget } from '../types/geometry';
+import type { DrillParseSettings, GeometryHighlightTarget } from '../types/geometry';
+import type { KernelJobResult, KernelProgress } from '../kernel/types';
 import { acceptedFileExtensions, LAYER_COLORS, LAYER_LABELS } from '../utils/layerUtils';
 import { computeUnionViewBox } from '../utils/gerberUtils';
 import { GeometryPanel } from './GeometryPanel';
+import {
+  CamWorkflowPanel,
+  type OpConfig,
+  type OpConfigMap,
+  type StockConfig,
+} from './cam/CamWorkflowPanel';
 
 interface Props {
   layers: LayerEntry[];
   parsing: boolean;
   errors: Array<{ filename: string; message: string }>;
-  camJob: CamJob;
   onToggle: (id: string) => void;
   onRemove: (id: string) => void;
   onAddFiles: (files: File[]) => void;
@@ -20,13 +26,22 @@ interface Props {
   onHoleDiameterChange: (layerId: string, defId: string, newDiameterMm: number) => void;
   onGeometryHighlight: (target: GeometryHighlightTarget | null) => void;
   onDrillSettingsChange: (layerId: string, settings: DrillParseSettings) => void;
+  opConfigs: OpConfigMap;
+  onOpConfigChange: (layerId: string, config: OpConfig) => void;
+  onGenerate: () => void;
+  onExport: () => void;
+  kernelBusy: KernelProgress | null;
+  camResult: KernelJobResult | null;
+  camStale: boolean;
+  stock: StockConfig;
+  onStockChange: (stock: StockConfig) => void;
+  circuitSizeMm: { width: number; height: number } | null;
 }
 
 export function LayerInfo({
   layers,
   parsing,
   errors,
-  camJob,
   onToggle,
   onRemove,
   onAddFiles,
@@ -37,6 +52,16 @@ export function LayerInfo({
   onHoleDiameterChange,
   onGeometryHighlight,
   onDrillSettingsChange,
+  opConfigs,
+  onOpConfigChange,
+  onGenerate,
+  onExport,
+  kernelBusy,
+  camResult,
+  camStale,
+  stock,
+  onStockChange,
+  circuitSizeMm,
 }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -48,14 +73,13 @@ export function LayerInfo({
   };
 
   const unionViewBox = computeUnionViewBox(layers.map((l) => l.result));
-  const firstUnits = layers.find((l) => l.result.units)?.result.units ?? 'mm';
   const boardW = unionViewBox ? (unionViewBox[2] / 1000).toFixed(2) : null;
   const boardH = unionViewBox ? (unionViewBox[3] / 1000).toFixed(2) : null;
   const selectedLayer = layers.find((l) => l.id === selectedId) ?? null;
 
   return (
     <aside className="flex flex-col gap-3 h-full overflow-hidden">
-      <h2 className="text-xs font-semibold uppercase tracking-widest text-zinc-500 shrink-0">CAM Job</h2>
+      <h2 className="text-xs font-semibold uppercase tracking-widest text-zinc-500 shrink-0">Layers</h2>
 
       {errors.map((err) => (
         <div key={err.filename} className="shrink-0 flex items-start gap-2 rounded-lg bg-red-950/50 border border-red-800 px-3 py-2 text-xs">
@@ -69,8 +93,6 @@ export function LayerInfo({
       ))}
 
       <div className="flex-1 overflow-y-auto flex flex-col gap-2 min-h-0">
-        <JobSummary camJob={camJob} />
-
         <div className="flex flex-col gap-1">
           {layers.map((layer) => (
             <LayerRow
@@ -91,35 +113,36 @@ export function LayerInfo({
         </div>
 
         {selectedLayer && (
-          <>
-            <ImportReportPanel layer={selectedLayer} />
-            {selectedLayer.layerType === 'drill' && selectedLayer.drillSettings && (
-              <DrillSettingsPanel
-                layer={selectedLayer}
-                onApply={(settings) => onDrillSettingsChange(selectedLayer.id, settings)}
-              />
-            )}
-            <GeometryPanel
-              layer={selectedLayer}
-              matches={camJob.padHoleAnalysis.matches.filter(
-                (m) => m.pad.layerId === selectedLayer.id || m.hole.layerId === selectedLayer.id,
-              )}
-              onPadSizeChange={onPadSizeChange}
-              onTraceWidthChange={onTraceWidthChange}
-              onHoleDiameterChange={onHoleDiameterChange}
-              onGeometryHighlight={onGeometryHighlight}
-            />
-          </>
+          <InspectSection
+            layer={selectedLayer}
+            onPadSizeChange={onPadSizeChange}
+            onTraceWidthChange={onTraceWidthChange}
+            onHoleDiameterChange={onHoleDiameterChange}
+            onGeometryHighlight={onGeometryHighlight}
+            onDrillSettingsChange={onDrillSettingsChange}
+          />
         )}
 
-        <ValidationPanel camJob={camJob} />
+        <CamWorkflowPanel
+          layers={layers}
+          configs={opConfigs}
+          onConfigChange={onOpConfigChange}
+          onGenerate={onGenerate}
+          onExport={onExport}
+          busy={kernelBusy}
+          camResult={camResult}
+          camStale={camStale}
+          stock={stock}
+          onStockChange={onStockChange}
+          circuitSizeMm={circuitSizeMm}
+        />
       </div>
 
       {boardW && boardH && (
         <div className="shrink-0 rounded-lg bg-zinc-900 border border-zinc-800 px-3 py-2">
           <p className="text-xs text-zinc-500 mb-1">Board size</p>
           <p className="text-xs font-mono text-zinc-200">
-            {boardW} x {boardH} <span className="text-zinc-500">{firstUnits}</span>
+            {boardW} x {boardH} <span className="text-zinc-500">mm</span>
           </p>
         </div>
       )}
@@ -143,45 +166,38 @@ export function LayerInfo({
   );
 }
 
-function JobSummary({ camJob }: { camJob: CamJob }) {
-  const errors = camJob.validationIssues.filter((i) => i.severity === 'error').length;
-  const warnings = camJob.validationIssues.filter((i) => i.severity === 'warning').length;
+/** Collapsible per-layer inspection: pad/trace/hole editors + drill units. */
+function InspectSection({
+  layer,
+  onPadSizeChange,
+  onTraceWidthChange,
+  onHoleDiameterChange,
+  onGeometryHighlight,
+  onDrillSettingsChange,
+}: {
+  layer: LayerEntry;
+  onPadSizeChange: (layerId: string, defId: string, newDiameterMm: number) => void;
+  onTraceWidthChange: (layerId: string, oldRaw: number, newWidthMm: number) => void;
+  onHoleDiameterChange: (layerId: string, defId: string, newDiameterMm: number) => void;
+  onGeometryHighlight: (target: GeometryHighlightTarget | null) => void;
+  onDrillSettingsChange: (layerId: string, settings: DrillParseSettings) => void;
+}) {
   return (
-    <div className="grid grid-cols-3 gap-1">
-      <Metric label="Ops" value={camJob.operations.length} />
-      <Metric label="Warn" value={warnings} tone={warnings ? 'warning' : 'normal'} />
-      <Metric label="Err" value={errors} tone={errors ? 'error' : 'normal'} />
-    </div>
-  );
-}
-
-function Metric({ label, value, tone = 'normal' }: { label: string; value: number; tone?: 'normal' | 'warning' | 'error' }) {
-  const color = tone === 'error' ? 'text-red-300' : tone === 'warning' ? 'text-amber-300' : 'text-zinc-200';
-  return (
-    <div className="rounded bg-zinc-900 border border-zinc-800 px-2 py-1">
-      <p className="text-[10px] uppercase tracking-wide text-zinc-600">{label}</p>
-      <p className={`text-sm font-mono ${color}`}>{value}</p>
-    </div>
-  );
-}
-
-function ImportReportPanel({ layer }: { layer: LayerEntry }) {
-  const report = layer.importReport;
-  return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-2 text-xs">
-      <div className="flex items-center justify-between mb-1">
-        <span className="font-medium text-zinc-300">Import Report</span>
-        <span className={report.confidence === 'high' ? 'text-green-400' : report.confidence === 'medium' ? 'text-amber-300' : 'text-red-300'}>
-          {report.confidence}
-        </span>
-      </div>
-      <p className="text-zinc-500">
-        {report.parserFiletype} / {report.units ?? 'units?'} / {report.geometryCounts.padInstances} pads / {report.geometryCounts.holes} holes
-      </p>
-      {report.warnings.map((warning) => (
-        <p key={warning} className="mt-1 text-amber-300">{warning}</p>
-      ))}
-    </div>
+    <>
+      {layer.layerType === 'drill' && layer.drillSettings && (
+        <DrillSettingsPanel
+          layer={layer}
+          onApply={(settings) => onDrillSettingsChange(layer.id, settings)}
+        />
+      )}
+      <GeometryPanel
+        layer={layer}
+        onPadSizeChange={onPadSizeChange}
+        onTraceWidthChange={onTraceWidthChange}
+        onHoleDiameterChange={onHoleDiameterChange}
+        onGeometryHighlight={onGeometryHighlight}
+      />
+    </>
   );
 }
 
@@ -189,74 +205,25 @@ function DrillSettingsPanel({ layer, onApply }: { layer: LayerEntry; onApply: (s
   const [settings, setSettings] = useState(layer.drillSettings!);
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-2 text-xs">
-      <p className="font-medium text-zinc-300 mb-2">Drill Override</p>
-      <div className="grid grid-cols-2 gap-2">
-        <label className="flex flex-col gap-1 text-zinc-500">
-          Units
-          <select
-            value={settings.units}
-            onChange={(e) => setSettings({ ...settings, units: e.target.value as DrillParseSettings['units'] })}
-            className="bg-zinc-800 border border-zinc-700 rounded px-1 py-1 text-zinc-200"
-          >
-            <option value="auto">Auto</option>
-            <option value="mm">mm</option>
-            <option value="in">inch</option>
-          </select>
-        </label>
-        <label className="flex flex-col gap-1 text-zinc-500">
-          Zero
-          <select
-            value={settings.zeroSuppression}
-            onChange={(e) => setSettings({ ...settings, zeroSuppression: e.target.value as DrillParseSettings['zeroSuppression'] })}
-            className="bg-zinc-800 border border-zinc-700 rounded px-1 py-1 text-zinc-200"
-          >
-            <option value="auto">Auto</option>
-            <option value="leading">Leading</option>
-            <option value="trailing">Trailing</option>
-          </select>
-        </label>
-      </div>
-      <p className="mt-2 text-zinc-600">V1 uses units for reparse; format fields are tracked for diagnostics.</p>
+      <p className="font-medium text-zinc-300 mb-2">Drill Units</p>
+      <label className="flex items-center justify-between gap-2 text-zinc-500">
+        Units
+        <select
+          value={settings.units}
+          onChange={(e) => setSettings({ ...settings, units: e.target.value as DrillParseSettings['units'] })}
+          className="bg-zinc-800 border border-zinc-700 rounded px-1 py-1 text-zinc-200"
+        >
+          <option value="auto">Auto</option>
+          <option value="mm">mm</option>
+          <option value="in">inch</option>
+        </select>
+      </label>
       <button
         onClick={() => onApply(settings)}
         className="mt-2 w-full px-2 py-1 rounded bg-zinc-700 hover:bg-zinc-600 text-zinc-200"
       >
         Reparse drill
       </button>
-    </div>
-  );
-}
-
-function ValidationPanel({ camJob }: { camJob: CamJob }) {
-  if (!camJob.validationIssues.length) {
-    return (
-      <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-2 text-xs text-green-300">
-        CAM validation: no issues found
-      </div>
-    );
-  }
-  return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-2">
-      <p className="text-xs font-medium text-zinc-300 mb-2">CAM Validation</p>
-      <div className="flex flex-col gap-1.5">
-        {camJob.validationIssues.slice(0, 12).map((issue) => (
-          <div key={issue.id} className="text-xs">
-            <span className={[
-              'inline-block mr-1 px-1 rounded text-[10px]',
-              issue.severity === 'error' ? 'bg-red-900 text-red-200' :
-                issue.severity === 'warning' ? 'bg-amber-900 text-amber-200' :
-                  'bg-zinc-800 text-zinc-300',
-            ].join(' ')}>
-              {issue.severity}
-            </span>
-            <span className="text-zinc-300">{issue.title}</span>
-            <p className="text-zinc-500 mt-0.5">{issue.detail}</p>
-          </div>
-        ))}
-        {camJob.validationIssues.length > 12 && (
-          <p className="text-xs text-zinc-600">+{camJob.validationIssues.length - 12} more issues</p>
-        )}
-      </div>
     </div>
   );
 }
@@ -270,7 +237,11 @@ function LayerRow({ layer, selected, onSelect, onToggle, onRemove }: {
 }) {
   const color = LAYER_COLORS[layer.layerType];
   const label = LAYER_LABELS[layer.layerType];
-  const warningCount = layer.importReport.warnings.length;
+  const warnings = layer.importReport.warnings;
+  const confidence = layer.importReport.confidence;
+  const confidenceColor =
+    confidence === 'high' ? 'bg-green-400' : confidence === 'medium' ? 'bg-amber-400' : 'bg-red-400';
+  const sourceBadge = layer.primitives?.source === 'svg-fallback' ? 'fallback' : null;
 
   return (
     <div
@@ -280,13 +251,20 @@ function LayerRow({ layer, selected, onSelect, onToggle, onRemove }: {
         selected ? 'ring-1 ring-green-500/40' : '',
       ].join(' ')}
       onClick={onSelect}
+      title={warnings.length > 0 ? warnings.join('\n') : `Detection confidence: ${confidence}`}
     >
       <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: layer.visible ? color : '#52525b' }} />
       <div className="flex-1 min-w-0">
         <p className="text-xs text-zinc-200 truncate leading-tight">{layer.file.name}</p>
         <p className="text-xs text-zinc-500 leading-tight flex items-center gap-1">
+          <span className={`inline-block w-1.5 h-1.5 rounded-full ${confidenceColor}`} />
           {label}
-          {warningCount > 0 && <span className="text-amber-300">({warningCount})</span>}
+          {sourceBadge && (
+            <span className="px-1 rounded bg-zinc-800 text-[10px] text-amber-300" title="Reduced-fidelity geometry source (parser fallback)">
+              {sourceBadge}
+            </span>
+          )}
+          {warnings.length > 0 && <span className="text-amber-300">({warnings.length})</span>}
         </p>
       </div>
       <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity" onClick={(e) => e.stopPropagation()}>

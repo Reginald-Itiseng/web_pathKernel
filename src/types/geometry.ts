@@ -147,26 +147,10 @@ export interface Point2D {
   y: number;
 }
 
-export interface CamOperation {
-  id: string;
-  type: 'isolation' | 'drill' | 'outline';
-  layerId: string;
-  label: string;
-  paths: Point2D[][];
-}
-
-export interface HpglExportSettings {
-  unitsPerMm: number;
-  origin: 'board-min' | 'absolute';
-  invertY: boolean;
-  penNumber: number;
-}
-
 export interface CamJob {
   layers: import('../utils/gerberUtils').LayerEntry[];
   boardBounds: [number, number, number, number] | null;
   importReports: ImportReport[];
   padHoleAnalysis: PadHoleAnalysis;
   validationIssues: ValidationIssue[];
-  operations: CamOperation[];
 }

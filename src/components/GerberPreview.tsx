@@ -8,10 +8,18 @@ import {
 import { LAYER_Z_ORDER } from '../utils/layerUtils';
 import { SelectionPopup, type ElementSelection } from './SelectionPopup';
 import type { GeometryHighlightTarget, PadHoleMatch } from '../types/geometry';
+import type { Board3DModel, KernelJobResult, OperationKind } from '../kernel/types';
+import { formatSvgNumber } from '../utils/gerberUtils';
 
 const BoardViewport3D = lazy(() =>
   import('./BoardViewport3D').then((m) => ({ default: m.BoardViewport3D })),
 );
+
+export const TOOLPATH_COLORS: Record<OperationKind, string> = {
+  isolation: '#f0f',
+  drill: '#22d3ee',
+  cutout: '#4ade80',
+};
 
 interface Props {
   layers: LayerEntry[];
@@ -22,6 +30,8 @@ interface Props {
   onSingleTraceWidthChange:    (layerId: string, pathId: string,  newWidthMm: number)    => void;
   onHoleDiameterChange:        (layerId: string, defId: string,   newDiameterMm: number) => void;
   geometryHighlight: GeometryHighlightTarget | null;
+  camResult: KernelJobResult | null;
+  boardModel: Board3DModel | null;
 }
 
 type Tab = '2d' | '3d';
@@ -35,20 +45,112 @@ export function GerberPreview({
   padHoleMatches,
   onPadSizeChange, onTraceWidthChange, onSingleTraceWidthChange, onHoleDiameterChange,
   geometryHighlight,
+  camResult, boardModel,
 }: Props) {
   const [tab, setTab]           = useState<Tab>('2d');
-  const [zoom, setZoom]         = useState(1);
+  // Zoom and pan live in ONE state object so every update is a single pure
+  // updater (React StrictMode double-invokes updaters; nested setState inside
+  // an updater double-applies the pan compensation and drifts the view).
+  const [view, setView]         = useState({ zoom: 1, panX: 0, panY: 0 });
   const [dropOver, setDropOver] = useState(false);
   const [selection, setSelection] = useState<ElementSelection | null>(null);
+  const [overlayVisible, setOverlayVisible] = useState<Record<OperationKind, boolean>>({
+    isolation: true,
+    drill: true,
+    cutout: true,
+  });
 
   // Hover element tracked via ref — no re-render needed
   const hoveredElRef = useRef<Element | null>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const panelHighlightedElsRef = useRef<Element[]>([]);
+  const canvasRef = useRef<HTMLDivElement>(null);
+  // Drag-to-pan tracking; `moved` suppresses the click-to-edit after a drag.
+  const dragRef = useRef<{
+    active: boolean;
+    startX: number;
+    startY: number;
+    panStartX: number;
+    panStartY: number;
+    moved: boolean;
+  }>({ active: false, startX: 0, startY: 0, panStartX: 0, panStartY: 0, moved: false });
+  const [panning, setPanning] = useState(false);
 
-  const zoomIn    = () => setZoom((z) => Math.min(z * ZOOM_STEP, MAX_ZOOM));
-  const zoomOut   = () => setZoom((z) => Math.max(z / ZOOM_STEP, MIN_ZOOM));
-  const fitScreen = () => setZoom(1);
+  // Button zoom keeps the view centre fixed: pan scales with the zoom ratio
+  // (transform is `translate(pan) scale(zoom)` about the container centre).
+  const applyZoom = useCallback((factor: number) => {
+    setView((v) => {
+      const nextZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, v.zoom * factor));
+      const ratio = nextZoom / v.zoom;
+      return { zoom: nextZoom, panX: v.panX * ratio, panY: v.panY * ratio };
+    });
+  }, []);
+  const zoomIn    = () => applyZoom(ZOOM_STEP);
+  const zoomOut   = () => applyZoom(1 / ZOOM_STEP);
+  const fitScreen = () => setView({ zoom: 1, panX: 0, panY: 0 });
+
+  // ── Mouse wheel zoom (about the cursor) ───────────────────────────────────
+  // Native non-passive listener — React's onWheel can't preventDefault.
+  React.useEffect(() => {
+    const el = canvasRef.current;
+    if (!el || tab !== '2d') return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const rect = el.getBoundingClientRect();
+      // Cursor position relative to the container centre.
+      const mx = e.clientX - rect.left - rect.width / 2;
+      const my = e.clientY - rect.top - rect.height / 2;
+      setView((v) => {
+        const next = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, v.zoom * Math.exp(-e.deltaY * 0.0015)));
+        if (next === v.zoom) return v;
+        // Keep the content point under the cursor stationary:
+        // p' = pan + zoom·q  ⇒  pan' = m − (z'/z)·(m − pan)
+        const ratio = next / v.zoom;
+        return {
+          zoom: next,
+          panX: mx - ratio * (mx - v.panX),
+          panY: my - ratio * (my - v.panY),
+        };
+      });
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [tab]);
+
+  // ── Drag to pan (left- or middle-button) ──────────────────────────────────
+  const handlePanMouseDown = useCallback((e: React.MouseEvent) => {
+    if (e.button !== 0 && e.button !== 1) return;
+    e.preventDefault(); // stop text selection / middle-click autoscroll
+    dragRef.current = {
+      active: true,
+      startX: e.clientX,
+      startY: e.clientY,
+      panStartX: view.panX,
+      panStartY: view.panY,
+      moved: false,
+    };
+  }, [view.panX, view.panY]);
+
+  const handlePanMouseMove = useCallback((e: React.MouseEvent) => {
+    const drag = dragRef.current;
+    if (!drag.active) return;
+    const dx = e.clientX - drag.startX;
+    const dy = e.clientY - drag.startY;
+    if (!drag.moved && Math.hypot(dx, dy) > 4) {
+      drag.moved = true;
+      setPanning(true);
+    }
+    if (drag.moved) {
+      setView((v) => ({ ...v, panX: drag.panStartX + dx, panY: drag.panStartY + dy }));
+    }
+  }, []);
+
+  const endPan = useCallback(() => {
+    if (dragRef.current.active) {
+      dragRef.current.active = false;
+      setPanning(false);
+    }
+  }, []);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -155,6 +257,11 @@ export function GerberPreview({
 
   // ── Element selection on click ────────────────────────────────────────────
   const handleCompositeClick = useCallback((e: React.MouseEvent) => {
+    // A drag-to-pan ends with a click event — don't treat it as a selection.
+    if (dragRef.current.moved) {
+      dragRef.current.moved = false;
+      return;
+    }
     const target = e.target as Element;
 
     const layerSvg = target.closest('[data-layer-id]');
@@ -275,12 +382,42 @@ export function GerberPreview({
     padHoleMatches,
   ]);
 
-  const firstUnits = layers.find((l) => l.result.units)?.result.units ?? 'mm';
   const boardXMin  = unionViewBox ? unionViewBox[0] / 1000 : null;
   const boardYMin  = unionViewBox ? unionViewBox[1] / 1000 : null;
   const boardW     = unionViewBox ? unionViewBox[2] / 1000 : null;
   const boardH     = unionViewBox ? unionViewBox[3] / 1000 : null;
-  const has3d      = boardXMin != null && boardYMin != null && boardW != null && boardH != null;
+  const has3d      = boardModel != null ||
+    (boardXMin != null && boardYMin != null && boardW != null && boardH != null);
+
+  // ── Toolpath overlay (kernel results drawn over the composite) ────────────
+  const toolpathOps = camResult?.operations ?? [];
+  const hasToolpaths = toolpathOps.length > 0;
+  const overlaySvg = React.useMemo(() => {
+    if (!unionViewBox || toolpathOps.length === 0) return null;
+    const [uvX, uvY, uvW, uvH] = unionViewBox;
+    // Same Y-flip as the composite: Gerber (0,0) sits at SVG y = uvH + 2·uvY.
+    const yFlip = `translate(0,${formatSvgNumber(uvH + 2 * uvY)}) scale(1,-1)`;
+    const groups = toolpathOps
+      .filter((op) => overlayVisible[op.kind])
+      .map((op) => {
+        const color = TOOLPATH_COLORS[op.kind];
+        const polylines = op.previewPolylines
+          .map((line) => {
+            const points = line
+              .map((p) => `${formatSvgNumber(p.x * 1000)},${formatSvgNumber(p.y * 1000)}`)
+              .join(' ');
+            return `<polyline points="${points}" />`;
+          })
+          .join('');
+        return `<g stroke="${color}" stroke-width="90" fill="none" stroke-linecap="round" stroke-linejoin="round" opacity="0.9">${polylines}</g>`;
+      })
+      .join('');
+    return (
+      `<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%" ` +
+      `viewBox="${uvX} ${uvY} ${uvW} ${uvH}" preserveAspectRatio="xMidYMid meet" overflow="visible">` +
+      `<g transform="${yFlip}">${groups}</g></svg>`
+    );
+  }, [unionViewBox, toolpathOps, overlayVisible]);
 
   return (
     <div className="flex flex-col h-full">
@@ -295,10 +432,20 @@ export function GerberPreview({
 
       {/* Canvas */}
       <div
+        ref={canvasRef}
         className="relative flex-1 overflow-hidden preview-grid rounded-xl"
+        style={tab === '2d' ? { cursor: panning ? 'grabbing' : 'grab' } : undefined}
         onDragOver={(e) => { e.preventDefault(); setDropOver(true); }}
         onDragLeave={() => setDropOver(false)}
         onDrop={handleDrop}
+        {...(tab === '2d'
+          ? {
+              onMouseDown: handlePanMouseDown,
+              onMouseMove: handlePanMouseMove,
+              onMouseUp: endPan,
+              onMouseLeave: endPan,
+            }
+          : {})}
       >
         {dropOver && (
           <div className="absolute inset-0 z-20 flex items-center justify-center rounded-xl border-2 border-green-400 bg-green-400/10 pointer-events-none">
@@ -312,27 +459,64 @@ export function GerberPreview({
             <div
               ref={wrapperRef}
               className="absolute inset-0 p-4 gerber-svg-wrapper pcb-interactive"
-              style={{ transform: `scale(${zoom})`, transformOrigin: 'center center', transition: 'transform 0.12s ease' }}
+              style={{
+                transform: `translate(${view.panX}px, ${view.panY}px) scale(${view.zoom})`,
+                transformOrigin: 'center center',
+                transition: panning ? 'none' : 'transform 0.12s ease',
+              }}
               dangerouslySetInnerHTML={{ __html: compositeSvg ?? '' }}
               onClick={handleCompositeClick}
               onMouseMove={handleMouseMove}
               onMouseLeave={handleMouseLeave}
             />
 
+            {/* Toolpath overlay — aligned to the composite via identical layout */}
+            {overlaySvg && (
+              <div
+                className="absolute inset-0 p-4 pointer-events-none gerber-svg-wrapper"
+                style={{
+                  transform: `translate(${view.panX}px, ${view.panY}px) scale(${view.zoom})`,
+                  transformOrigin: 'center center',
+                  transition: panning ? 'none' : 'transform 0.12s ease',
+                }}
+                dangerouslySetInnerHTML={{ __html: overlaySvg }}
+              />
+            )}
+
+            {/* Toolpath visibility toggles */}
+            {hasToolpaths && (
+              <div className="absolute top-3 right-3 flex items-center gap-2 bg-zinc-900/90 border border-zinc-700 rounded-lg px-2 py-1 backdrop-blur-sm">
+                {(Object.keys(TOOLPATH_COLORS) as OperationKind[])
+                  .filter((kind) => toolpathOps.some((op) => op.kind === kind))
+                  .map((kind) => (
+                    <label key={kind} className="flex items-center gap-1 text-xs text-zinc-300 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={overlayVisible[kind]}
+                        onChange={(e) => setOverlayVisible((prev) => ({ ...prev, [kind]: e.target.checked }))}
+                        className="accent-current"
+                        style={{ accentColor: TOOLPATH_COLORS[kind] }}
+                      />
+                      <span style={{ color: TOOLPATH_COLORS[kind] }}>{kind}</span>
+                    </label>
+                  ))}
+              </div>
+            )}
+
             {/* Zoom controls */}
             <div className="absolute bottom-3 right-3 flex items-center gap-1 bg-zinc-900/90 border border-zinc-700 rounded-lg p-1 backdrop-blur-sm">
-              <ZoomButton onClick={zoomOut} title="Zoom out" disabled={zoom <= MIN_ZOOM}><MinusIcon /></ZoomButton>
+              <ZoomButton onClick={zoomOut} title="Zoom out" disabled={view.zoom <= MIN_ZOOM}><MinusIcon /></ZoomButton>
               <button onClick={fitScreen} className="px-2 py-1 text-xs font-mono text-zinc-300 hover:text-zinc-100 hover:bg-zinc-700 rounded transition-colors min-w-[3.5rem] text-center">
-                {Math.round(zoom * 100)}%
+                {Math.round(view.zoom * 100)}%
               </button>
-              <ZoomButton onClick={zoomIn} title="Zoom in" disabled={zoom >= MAX_ZOOM}><PlusIcon /></ZoomButton>
+              <ZoomButton onClick={zoomIn} title="Zoom in" disabled={view.zoom >= MAX_ZOOM}><PlusIcon /></ZoomButton>
               <div className="w-px h-4 bg-zinc-700 mx-0.5" />
               <ZoomButton onClick={fitScreen} title="Fit to screen"><FitIcon /></ZoomButton>
             </div>
 
             {!dropOver && !selection && (
               <div className="absolute bottom-3 left-3 text-xs text-zinc-600 pointer-events-none">
-                Click a pad or trace to edit · Drag files to add layers
+                Scroll to zoom · Drag to pan · Click a pad or trace to edit
               </div>
             )}
           </>
@@ -348,8 +532,12 @@ export function GerberPreview({
               </div>
             }>
               <BoardViewport3D
-                boardXMin={boardXMin!} boardYMin={boardYMin!}
-                boardWidth={boardW!}   boardHeight={boardH!}
+                model={boardModel}
+                fallbackBounds={
+                  boardXMin != null && boardYMin != null && boardW != null && boardH != null
+                    ? { xMin: boardXMin, yMin: boardYMin, width: boardW, height: boardH }
+                    : null
+                }
               />
             </Suspense>
           </div>
@@ -365,7 +553,7 @@ export function GerberPreview({
       {boardW && boardH && (
         <div className="mt-2 flex items-center gap-2">
           <span className="px-3 py-1 rounded-full bg-zinc-800 border border-zinc-700 text-zinc-300 text-xs font-mono">
-            {boardW.toFixed(2)} × {boardH.toFixed(2)} {firstUnits}
+            {boardW.toFixed(2)} × {boardH.toFixed(2)} mm
           </span>
         </div>
       )}

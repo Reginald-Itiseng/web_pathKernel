@@ -1,0 +1,582 @@
+import React, { useState } from 'react';
+import type { LayerEntry } from '../../utils/gerberUtils';
+import { LAYER_LABELS } from '../../utils/layerUtils';
+import { deriveIsolationToolGeometry } from '../../kernel/cncParams';
+import { AUTO_STOCK_MARGIN_MM } from '../../kernel/board3d';
+import type {
+  CutoutParams,
+  DrillParams,
+  IsolationParams,
+  KernelJobResult,
+  KernelOpResult,
+  OperationRequest,
+  StockSettings,
+} from '../../kernel/types';
+
+/** Stock configuration held in App state. Auto → circuit bounds + margin. */
+export interface StockConfig {
+  auto: boolean;
+  widthMm: number;
+  heightMm: number;
+  offsetXMm: number;
+  offsetYMm: number;
+}
+
+export const DEFAULT_STOCK_CONFIG: StockConfig = {
+  auto: true,
+  widthMm: 100,
+  heightMm: 80,
+  offsetXMm: AUTO_STOCK_MARGIN_MM,
+  offsetYMm: AUTO_STOCK_MARGIN_MM,
+};
+
+/** Resolve the config to concrete kernel StockSettings (undefined = auto). */
+export function resolveStockSettings(config: StockConfig): StockSettings | undefined {
+  if (config.auto) return undefined;
+  return {
+    widthMm: config.widthMm,
+    heightMm: config.heightMm,
+    offsetXMm: config.offsetXMm,
+    offsetYMm: config.offsetYMm,
+  };
+}
+
+export const DEFAULT_ISOLATION_PARAMS: IsolationParams = {
+  toolDiameterMm: 0.2,
+  passes: 1,
+  overlap: 0.5,
+  isoType: 'exterior',
+  toolProfile: 'conical',
+  tipDiameterMm: 0.1,
+  toolAngleDeg: 30,
+  cuttingDepthMm: 0.1,
+  traceMarginMm: 0,
+  hatchingMarginMm: 0,
+  joinStyle: 'round',
+  skipTightClearancePaths: false,
+  extraPadContours: 0,
+};
+
+export const DEFAULT_DRILL_PARAMS: DrillParams = {
+  toolDiameterMm: 0.8,
+  lateralStepoverPct: 50,
+  allowOversizeForSmallHoles: false,
+};
+
+export const DEFAULT_CUTOUT_PARAMS: CutoutParams = {
+  toolDiameterMm: 2,
+  compensation: 'outside',
+  holdingTabCount: 4,
+  holdingTabWidthMm: 1,
+};
+
+/** Per-layer operation configuration held in App state. */
+export type OpConfig =
+  | { kind: 'isolation'; enabled: boolean; toolNumber: number; params: IsolationParams }
+  | { kind: 'drill'; enabled: boolean; toolNumber: number; params: DrillParams }
+  | { kind: 'cutout'; enabled: boolean; toolNumber: number; params: CutoutParams };
+
+export type OpConfigMap = Record<string, OpConfig>;
+
+/** Seed one op config per CAM-relevant layer, preserving existing entries. */
+export function seedOpConfigs(layers: LayerEntry[], existing: OpConfigMap): OpConfigMap {
+  const next: OpConfigMap = {};
+  for (const layer of layers) {
+    if (existing[layer.id]) {
+      next[layer.id] = existing[layer.id];
+      continue;
+    }
+    if (layer.layerType === 'top-copper' || layer.layerType === 'bottom-copper') {
+      next[layer.id] = {
+        kind: 'isolation',
+        enabled: true,
+        toolNumber: 1,
+        params: { ...DEFAULT_ISOLATION_PARAMS },
+      };
+    } else if (layer.layerType === 'drill') {
+      next[layer.id] = {
+        kind: 'drill',
+        enabled: true,
+        toolNumber: 2,
+        params: { ...DEFAULT_DRILL_PARAMS },
+      };
+    } else if (layer.layerType === 'board-outline') {
+      next[layer.id] = {
+        kind: 'cutout',
+        enabled: true,
+        toolNumber: 3,
+        params: { ...DEFAULT_CUTOUT_PARAMS },
+      };
+    }
+  }
+  return next;
+}
+
+export function buildOperationRequests(layers: LayerEntry[], configs: OpConfigMap): OperationRequest[] {
+  const out: OperationRequest[] = [];
+  for (const layer of layers) {
+    const config = configs[layer.id];
+    if (!config || !config.enabled || !layer.primitives) continue;
+    out.push({
+      id: `${config.kind}:${layer.id}`,
+      kind: config.kind,
+      layerId: layer.id,
+      toolNumber: config.toolNumber,
+      params: config.params,
+    } as OperationRequest);
+  }
+  return out;
+}
+
+interface Props {
+  layers: LayerEntry[];
+  configs: OpConfigMap;
+  onConfigChange: (layerId: string, config: OpConfig) => void;
+  onGenerate: () => void;
+  onExport: () => void;
+  busy: { stage: string; pct: number } | null;
+  camResult: KernelJobResult | null;
+  camStale: boolean;
+  stock: StockConfig;
+  onStockChange: (stock: StockConfig) => void;
+  /** Circuit bounding box in mm [minX, minY, width, height], for auto stock. */
+  circuitSizeMm: { width: number; height: number } | null;
+}
+
+export function CamWorkflowPanel({
+  layers,
+  configs,
+  onConfigChange,
+  onGenerate,
+  onExport,
+  busy,
+  camResult,
+  camStale,
+  stock,
+  onStockChange,
+  circuitSizeMm,
+}: Props) {
+  // Fixed workflow order regardless of file load order:
+  // top isolation → bottom isolation → drill → cutout.
+  const OP_ORDER: Partial<Record<LayerEntry['layerType'], number>> = {
+    'top-copper': 0,
+    'bottom-copper': 1,
+    drill: 2,
+    'board-outline': 3,
+  };
+  const camLayers = layers
+    .filter((l) => configs[l.id])
+    .sort((a, b) => (OP_ORDER[a.layerType] ?? 9) - (OP_ORDER[b.layerType] ?? 9));
+  if (camLayers.length === 0) return null;
+
+  const resultsByOpId = new Map<string, KernelOpResult>(
+    (camResult?.operations ?? []).map((op) => [op.id, op]),
+  );
+
+  return (
+    <div className="flex flex-col gap-2">
+      <h3 className="text-xs font-semibold uppercase tracking-widest text-zinc-500 mt-1">
+        Stock
+      </h3>
+      <StockPanel stock={stock} onChange={onStockChange} circuitSizeMm={circuitSizeMm} />
+
+      <h3 className="text-xs font-semibold uppercase tracking-widest text-zinc-500 mt-1">
+        Operations
+      </h3>
+
+      {camLayers.map((layer) => {
+        const config = configs[layer.id];
+        return (
+          <OperationCard
+            key={layer.id}
+            layer={layer}
+            config={config}
+            result={resultsByOpId.get(`${config.kind}:${layer.id}`) ?? null}
+            stale={camStale}
+            onChange={(next) => onConfigChange(layer.id, next)}
+          />
+        );
+      })}
+
+      <button
+        onClick={onGenerate}
+        disabled={busy != null || camLayers.every((l) => !configs[l.id]?.enabled)}
+        className="w-full px-3 py-2 text-sm font-medium text-zinc-900 bg-cyan-400 hover:bg-cyan-300 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+      >
+        {busy ? `${busy.stage}…` : camResult ? 'Regenerate toolpaths' : 'Generate toolpaths'}
+      </button>
+      {busy && (
+        <div className="h-1 rounded bg-zinc-800 overflow-hidden">
+          <div
+            className="h-full bg-cyan-400 transition-all"
+            style={{ width: `${Math.round(busy.pct * 100)}%` }}
+          />
+        </div>
+      )}
+      {camStale && camResult && !busy && (
+        <p className="text-xs text-amber-300">Layers changed — toolpaths are stale. Regenerate before exporting.</p>
+      )}
+
+      {camResult && camResult.operations.length > 0 && (
+        <button
+          onClick={onExport}
+          disabled={busy != null || camStale}
+          className="w-full px-3 py-2 text-sm font-medium text-zinc-900 bg-green-400 hover:bg-green-300 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          Export HPGL
+        </button>
+      )}
+    </div>
+  );
+}
+
+function StockPanel({
+  stock,
+  onChange,
+  circuitSizeMm,
+}: {
+  stock: StockConfig;
+  onChange: (stock: StockConfig) => void;
+  circuitSizeMm: { width: number; height: number } | null;
+}) {
+  const autoW = circuitSizeMm ? circuitSizeMm.width + 2 * AUTO_STOCK_MARGIN_MM : null;
+  const autoH = circuitSizeMm ? circuitSizeMm.height + 2 * AUTO_STOCK_MARGIN_MM : null;
+
+  const fits =
+    stock.auto ||
+    circuitSizeMm == null ||
+    (circuitSizeMm.width + stock.offsetXMm <= stock.widthMm + 1e-9 &&
+      circuitSizeMm.height + stock.offsetYMm <= stock.heightMm + 1e-9);
+
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-2 flex flex-col gap-1.5">
+      <CheckboxField
+        label={`Auto size (circuit + ${AUTO_STOCK_MARGIN_MM} mm margin)`}
+        checked={stock.auto}
+        onChange={(auto) =>
+          onChange(
+            auto || autoW == null || autoH == null
+              ? { ...stock, auto }
+              : {
+                  // Seed manual mode from the current auto values.
+                  auto,
+                  widthMm: Math.ceil(autoW),
+                  heightMm: Math.ceil(autoH),
+                  offsetXMm: AUTO_STOCK_MARGIN_MM,
+                  offsetYMm: AUTO_STOCK_MARGIN_MM,
+                },
+          )
+        }
+      />
+      {stock.auto ? (
+        autoW != null &&
+        autoH != null && (
+          <p className="text-[11px] text-zinc-500 font-mono">
+            {autoW.toFixed(1)} × {autoH.toFixed(1)} mm · circuit at {AUTO_STOCK_MARGIN_MM},{AUTO_STOCK_MARGIN_MM}
+          </p>
+        )
+      ) : (
+        <>
+          <NumberField label="Stock width (mm)" value={stock.widthMm} step={5} min={1} onChange={(v) => onChange({ ...stock, widthMm: v })} />
+          <NumberField label="Stock height (mm)" value={stock.heightMm} step={5} min={1} onChange={(v) => onChange({ ...stock, heightMm: v })} />
+          <NumberField label="Circuit offset X (mm)" value={stock.offsetXMm} step={1} min={0} onChange={(v) => onChange({ ...stock, offsetXMm: v })} />
+          <NumberField label="Circuit offset Y (mm)" value={stock.offsetYMm} step={1} min={0} onChange={(v) => onChange({ ...stock, offsetYMm: v })} />
+          {!fits && (
+            <p className="text-[11px] text-amber-300">
+              Circuit ({circuitSizeMm!.width.toFixed(1)} × {circuitSizeMm!.height.toFixed(1)} mm) does not fit
+              on the stock at this offset.
+            </p>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function OperationCard({
+  layer,
+  config,
+  result,
+  stale,
+  onChange,
+}: {
+  layer: LayerEntry;
+  config: OpConfig;
+  result: KernelOpResult | null;
+  stale: boolean;
+  onChange: (config: OpConfig) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const kindLabel =
+    config.kind === 'isolation' ? 'Isolation' : config.kind === 'drill' ? 'Drill' : 'Cutout';
+  const kindColor =
+    config.kind === 'isolation' ? 'text-fuchsia-300' : config.kind === 'drill' ? 'text-cyan-300' : 'text-green-300';
+
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-zinc-900/60">
+      <div className="flex items-center gap-2 px-3 py-2">
+        <input
+          type="checkbox"
+          checked={config.enabled}
+          onChange={(e) => onChange({ ...config, enabled: e.target.checked } as OpConfig)}
+          className="accent-cyan-400"
+        />
+        <button className="flex-1 min-w-0 text-left" onClick={() => setOpen(!open)}>
+          <span className={`text-xs font-medium ${kindColor}`}>{kindLabel}</span>
+          <span className="text-xs text-zinc-500 ml-1.5 truncate">
+            {LAYER_LABELS[layer.layerType]} · {layer.file.name}
+          </span>
+        </button>
+        <span className="text-xs text-zinc-600">{open ? '▾' : '▸'}</span>
+      </div>
+
+      {open && (
+        <div className="px-3 pb-3 border-t border-zinc-800/60 pt-2">
+          {config.kind === 'isolation' && (
+            <IsolationParamsForm
+              params={config.params}
+              onChange={(params) => onChange({ ...config, params })}
+            />
+          )}
+          {config.kind === 'drill' && (
+            <DrillParamsForm
+              params={config.params}
+              onChange={(params) => onChange({ ...config, params })}
+            />
+          )}
+          {config.kind === 'cutout' && (
+            <CutoutParamsForm
+              params={config.params}
+              onChange={(params) => onChange({ ...config, params })}
+            />
+          )}
+          <NumberField
+            label="Tool #"
+            value={config.toolNumber}
+            step={1}
+            min={1}
+            onChange={(v) => onChange({ ...config, toolNumber: Math.max(1, Math.round(v)) } as OpConfig)}
+          />
+        </div>
+      )}
+
+      {result && (
+        <div className={`px-3 pb-2 flex flex-wrap gap-1 ${stale ? 'opacity-50' : ''}`}>
+          <Chip>{result.stats.strokeCount} paths</Chip>
+          <Chip>{result.stats.pathLengthMm.toFixed(0)} mm</Chip>
+          {result.stats.plungeCount != null && <Chip>{result.stats.plungeCount} plunges</Chip>}
+          {result.stats.borePassCount != null && result.stats.borePassCount > 0 && (
+            <Chip>{result.stats.borePassCount} bores</Chip>
+          )}
+          {result.stats.loopCount != null && <Chip>{result.stats.loopCount} loop(s)</Chip>}
+          {(result.stats.skippedSmallHoles ?? 0) > 0 && (
+            <Chip tone="warn">{result.stats.skippedSmallHoles} skipped</Chip>
+          )}
+          {(result.stats.skippedPasses ?? 0) > 0 && (
+            <Chip tone="warn">{result.stats.skippedPasses} passes skipped</Chip>
+          )}
+          {result.warnings.length > 0 && <Chip tone="warn">{result.warnings.length} warning(s)</Chip>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function IsolationParamsForm({
+  params,
+  onChange,
+}: {
+  params: IsolationParams;
+  onChange: (params: IsolationParams) => void;
+}) {
+  const tool = deriveIsolationToolGeometry(params);
+  return (
+    <div className="flex flex-col gap-1.5">
+      <SelectField
+        label="Tool profile"
+        value={params.toolProfile}
+        options={[
+          { value: 'conical', label: 'Conical (V-bit)' },
+          { value: 'cylindrical', label: 'Cylindrical' },
+        ]}
+        onChange={(v) => onChange({ ...params, toolProfile: v as IsolationParams['toolProfile'] })}
+      />
+      {params.toolProfile === 'conical' ? (
+        <>
+          <NumberField label="Tip Ø (mm)" value={params.tipDiameterMm} step={0.01} min={0} onChange={(v) => onChange({ ...params, tipDiameterMm: v })} />
+          <NumberField label="V angle (°)" value={params.toolAngleDeg} step={1} min={0} onChange={(v) => onChange({ ...params, toolAngleDeg: v })} />
+          <NumberField label="Cut depth (mm)" value={params.cuttingDepthMm} step={0.01} min={0} onChange={(v) => onChange({ ...params, cuttingDepthMm: v })} />
+        </>
+      ) : (
+        <>
+          <NumberField label="Tool Ø (mm)" value={params.toolDiameterMm} step={0.05} min={0.01} onChange={(v) => onChange({ ...params, toolDiameterMm: v })} />
+          <NumberField label="Overlap (0–0.9)" value={params.overlap} step={0.05} min={0} max={0.9} onChange={(v) => onChange({ ...params, overlap: v })} />
+        </>
+      )}
+      <NumberField label="Passes" value={params.passes} step={1} min={1} max={10} onChange={(v) => onChange({ ...params, passes: Math.max(1, Math.round(v)) })} />
+      <SelectField
+        label="Side"
+        value={params.isoType}
+        options={[
+          { value: 'exterior', label: 'Exterior only' },
+          { value: 'both', label: 'Both (exterior + interior)' },
+          { value: 'interior', label: 'Interior only' },
+        ]}
+        onChange={(v) => onChange({ ...params, isoType: v as IsolationParams['isoType'] })}
+      />
+      <NumberField label="Trace margin (mm)" value={params.traceMarginMm} step={0.01} min={0} onChange={(v) => onChange({ ...params, traceMarginMm: v })} />
+      <CheckboxField
+        label="Skip passes tighter than copper gap"
+        checked={params.skipTightClearancePaths}
+        onChange={(v) => onChange({ ...params, skipTightClearancePaths: v })}
+      />
+      <p className="text-[11px] text-zinc-500 font-mono mt-0.5">
+        D<sub>eff</sub> {tool.effectiveDiameterMm.toFixed(3)} mm · step {tool.hatchingMarginMm.toFixed(3)} mm
+      </p>
+    </div>
+  );
+}
+
+function DrillParamsForm({
+  params,
+  onChange,
+}: {
+  params: DrillParams;
+  onChange: (params: DrillParams) => void;
+}) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <NumberField label="Tool Ø (mm)" value={params.toolDiameterMm} step={0.1} min={0.1} onChange={(v) => onChange({ ...params, toolDiameterMm: v })} />
+      <NumberField label="Stepover (% radius)" value={params.lateralStepoverPct} step={5} min={1} max={100} onChange={(v) => onChange({ ...params, lateralStepoverPct: v })} />
+      <CheckboxField
+        label="Drill small holes oversize"
+        checked={params.allowOversizeForSmallHoles}
+        onChange={(v) => onChange({ ...params, allowOversizeForSmallHoles: v })}
+      />
+    </div>
+  );
+}
+
+function CutoutParamsForm({
+  params,
+  onChange,
+}: {
+  params: CutoutParams;
+  onChange: (params: CutoutParams) => void;
+}) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <NumberField label="Tool Ø (mm)" value={params.toolDiameterMm} step={0.1} min={0.1} onChange={(v) => onChange({ ...params, toolDiameterMm: v })} />
+      <SelectField
+        label="Compensation"
+        value={params.compensation}
+        options={[
+          { value: 'outside', label: 'Outside (keep board)' },
+          { value: 'inside', label: 'Inside (keep hole)' },
+          { value: 'onpath', label: 'On path' },
+        ]}
+        onChange={(v) => onChange({ ...params, compensation: v as CutoutParams['compensation'] })}
+      />
+      <NumberField label="Holding tabs" value={params.holdingTabCount} step={1} min={0} max={16} onChange={(v) => onChange({ ...params, holdingTabCount: Math.max(0, Math.round(v)) })} />
+      <NumberField label="Tab width (mm)" value={params.holdingTabWidthMm} step={0.25} min={0} onChange={(v) => onChange({ ...params, holdingTabWidthMm: v })} />
+    </div>
+  );
+}
+
+function NumberField({
+  label,
+  value,
+  onChange,
+  step,
+  min,
+  max,
+}: {
+  label: string;
+  value: number;
+  onChange: (value: number) => void;
+  step?: number;
+  min?: number;
+  max?: number;
+}) {
+  return (
+    <label className="flex items-center justify-between gap-2 text-xs text-zinc-400">
+      <span>{label}</span>
+      <input
+        type="number"
+        value={value}
+        step={step}
+        min={min}
+        max={max}
+        onChange={(e) => {
+          const v = parseFloat(e.target.value);
+          if (Number.isFinite(v)) onChange(v);
+        }}
+        className="w-20 bg-zinc-800 border border-zinc-700 rounded px-1.5 py-0.5 text-zinc-200 font-mono text-right"
+      />
+    </label>
+  );
+}
+
+function SelectField({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  options: Array<{ value: string; label: string }>;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="flex items-center justify-between gap-2 text-xs text-zinc-400">
+      <span className="shrink-0">{label}</span>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="flex-1 min-w-0 bg-zinc-800 border border-zinc-700 rounded px-1 py-0.5 text-zinc-200"
+      >
+        {options.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function CheckboxField({
+  label,
+  checked,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label className="flex items-center gap-2 text-xs text-zinc-400 cursor-pointer">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+        className="accent-cyan-400"
+      />
+      {label}
+    </label>
+  );
+}
+
+function Chip({ children, tone = 'normal' }: { children: React.ReactNode; tone?: 'normal' | 'warn' }) {
+  return (
+    <span
+      className={[
+        'px-1.5 py-0.5 rounded text-[10px] font-mono',
+        tone === 'warn' ? 'bg-amber-950 text-amber-300 border border-amber-900' : 'bg-zinc-800 text-zinc-400',
+      ].join(' ')}
+    >
+      {children}
+    </span>
+  );
+}

@@ -3,14 +3,11 @@ import type { LayerEntry } from '../utils/gerberUtils';
 import type {
   PadDefinition,
   GeometryHighlightTarget,
-  PadHoleMatch,
   TraceClass,
 } from '../types/geometry';
-import { LAYER_LABELS } from '../utils/layerUtils';
 
 interface Props {
   layer: LayerEntry;
-  matches: PadHoleMatch[];
   onPadSizeChange:      (layerId: string, defId: string, newDiameterMm: number) => void;
   onTraceWidthChange:   (layerId: string, oldRaw: number, newWidthMm: number) => void;
   onHoleDiameterChange: (layerId: string, defId: string, newDiameterMm: number) => void;
@@ -18,7 +15,7 @@ interface Props {
 }
 
 export function GeometryPanel({
-  layer, matches,
+  layer,
   onPadSizeChange, onTraceWidthChange, onHoleDiameterChange,
   onGeometryHighlight,
 }: Props) {
@@ -30,10 +27,6 @@ export function GeometryPanel({
 
   if (!hasGeo) return null;
 
-  const layerMatches = matches.filter(
-    (m) => m.pad.layerId === layer.id || m.hole.layerId === layer.id,
-  );
-
   return (
     <div className="rounded-lg overflow-hidden border border-zinc-800">
       {/* Header */}
@@ -41,7 +34,7 @@ export function GeometryPanel({
         onClick={() => setOpen((o) => !o)}
         className="w-full flex items-center justify-between px-3 py-2 bg-zinc-800/50 hover:bg-zinc-800 transition-colors text-left"
       >
-        <span className="text-xs font-medium text-zinc-300">Geometry</span>
+        <span className="text-xs font-medium text-zinc-300">Inspect &amp; edit</span>
         <span className="text-xs text-zinc-500 flex items-center gap-1">
           {geo
             ? isCopper
@@ -68,9 +61,6 @@ export function GeometryPanel({
                 onApply={onTraceWidthChange}
                 onGeometryHighlight={onGeometryHighlight}
               />
-              {layerMatches.length > 0 && (
-                <MatchSection matches={layerMatches} />
-              )}
             </>
           )}
 
@@ -234,37 +224,6 @@ function DrillSection({ defs, holeCount, layerId, onApply, onGeometryHighlight }
   );
 }
 
-// ─── Pad–hole match section ───────────────────────────────────────────────────
-
-function MatchSection({ matches }: { matches: PadHoleMatch[] }) {
-  // Deduplicate by hole defId so we show tool types not every instance
-  const seen = new Set<string>();
-  const unique = matches.filter((m) => {
-    if (seen.has(m.hole.defId + ':' + m.pad.defId)) return false;
-    seen.add(m.hole.defId + ':' + m.pad.defId);
-    return true;
-  });
-
-  return (
-    <div>
-      <SectionLabel>Pad–Hole Matches ({matches.length})</SectionLabel>
-      <div className="flex flex-col gap-1 mt-1">
-        {unique.slice(0, 8).map((m, i) => (
-          <div key={i} className="flex items-center gap-1 text-xs text-zinc-500 font-mono">
-            <span className="text-zinc-400">{m.pad.defId.split('_pad-')[1] ?? '?'}</span>
-            <span className="text-zinc-700">↔</span>
-            <span className="text-zinc-400">⌀{m.hole.diameterMm.toFixed(3)}mm</span>
-            <span className="text-zinc-700 ml-auto">@({m.pad.xMm.toFixed(2)},{m.pad.yMm.toFixed(2)})</span>
-          </div>
-        ))}
-        {unique.length > 8 && (
-          <p className="text-xs text-zinc-600">+{unique.length - 8} more…</p>
-        )}
-      </div>
-    </div>
-  );
-}
-
 // ─── Reusable editable value input ───────────────────────────────────────────
 
 function EditableValue({ initialMm, label, onApply }: {
@@ -364,6 +323,3 @@ function Chevron({ open }: { open: boolean }) {
     </svg>
   );
 }
-
-// Suppress unused import warning — LAYER_LABELS is available for consumers
-void LAYER_LABELS;

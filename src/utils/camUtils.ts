@@ -6,13 +6,10 @@ import {
 } from './geometryUtils';
 import type {
   CamJob,
-  CamOperation,
   DrillParseSettings,
-  HpglExportSettings,
   ImportReport,
   PadDefinition,
   PadHoleAnalysis,
-  Point2D,
   ValidationIssue,
   ValidationRuleSet,
 } from '../types/geometry';
@@ -26,13 +23,6 @@ export const DEFAULT_DRILL_SETTINGS: DrillParseSettings = {
   scale: 1,
   offsetXmm: 0,
   offsetYmm: 0,
-};
-
-export const DEFAULT_HPGL_SETTINGS: HpglExportSettings = {
-  unitsPerMm: 40,
-  origin: 'board-min',
-  invertY: true,
-  penNumber: 1,
 };
 
 export function buildImportReport(
@@ -79,7 +69,6 @@ export function buildCamJob(
   const boardBounds = computeUnionViewBox(layers.map((l) => l.result));
   const padHoleAnalysis = analyzePadHoleMatches(layers, rules);
   const validationIssues = validateLayers(layers, padHoleAnalysis, rules);
-  const operations = buildCamOperations(layers);
 
   return {
     layers,
@@ -87,7 +76,6 @@ export function buildCamJob(
     importReports: layers.map((l) => l.importReport),
     padHoleAnalysis,
     validationIssues,
-    operations,
   };
 }
 
@@ -212,135 +200,6 @@ function validateLayers(
   }
 
   return issues;
-}
-
-export function buildCamOperations(layers: LayerEntry[]): CamOperation[] {
-  const operations: CamOperation[] = [];
-
-  for (const layer of layers) {
-    if (layer.layerType === 'drill') {
-      const paths = (layer.geometry?.holeInstances ?? []).map((hole) => drillMarkPath(hole.xMm, hole.yMm, hole.diameterMm));
-      if (paths.length) {
-        operations.push({ id: `${layer.id}:drills`, type: 'drill', layerId: layer.id, label: `${layer.file.name} drill marks`, paths });
-      }
-    }
-
-    if (layer.layerType === 'top-copper' || layer.layerType === 'bottom-copper') {
-      const paths = extractPathPolylines(layer.result.svgString, layer.result.units);
-      if (paths.length) {
-        operations.push({ id: `${layer.id}:isolation`, type: 'isolation', layerId: layer.id, label: `${layer.file.name} copper center paths`, paths });
-      }
-    }
-
-    if (layer.layerType === 'board-outline') {
-      const paths = extractPathPolylines(layer.result.svgString, layer.result.units);
-      if (paths.length) {
-        operations.push({ id: `${layer.id}:outline`, type: 'outline', layerId: layer.id, label: `${layer.file.name} outline`, paths });
-      }
-    }
-  }
-
-  return operations;
-}
-
-export function exportHpgl(
-  operations: CamOperation[],
-  bounds: [number, number, number, number] | null,
-  settings: HpglExportSettings = DEFAULT_HPGL_SETTINGS,
-): string {
-  const [minX, minY, , heightRaw] = bounds ?? [0, 0, 0, 0];
-  const heightMm = heightRaw / 1000;
-  const lines = ['IN;', `SP${settings.penNumber};`, 'PA;'];
-
-  for (const operation of operations) {
-    lines.push(`; ${operation.type.toUpperCase()} ${operation.label}`);
-    for (const path of operation.paths) {
-      const points = path.filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
-      if (!points.length) continue;
-      const first = toHpglPoint(points[0], minX / 1000, minY / 1000, heightMm, settings);
-      lines.push(`PU${first.x},${first.y};`);
-      if (points.length > 1) {
-        const rest = points.map((p) => toHpglPoint(p, minX / 1000, minY / 1000, heightMm, settings));
-        lines.push(`PD${rest.map((p) => `${p.x},${p.y}`).join(',')};`);
-      }
-      lines.push('PU;');
-    }
-  }
-
-  lines.push('SP0;');
-  return lines.join('\n');
-}
-
-function drillMarkPath(x: number, y: number, diameter: number): Point2D[] {
-  const r = Math.max(diameter * 0.2, 0.05);
-  return [
-    { x: x - r, y },
-    { x: x + r, y },
-    { x, y },
-    { x, y: y - r },
-    { x, y: y + r },
-  ];
-}
-
-function extractPathPolylines(svgString: string, units: string | null): Point2D[][] {
-  const doc = new DOMParser().parseFromString(svgString, 'image/svg+xml');
-  const scale = units === 'in' ? 25.4 : 1;
-  return Array.from(doc.querySelectorAll('path'))
-    .map((path) => parseSimplePath(path.getAttribute('d') ?? '', scale))
-    .filter((path) => path.length > 1);
-}
-
-function parseSimplePath(d: string, scale: number): Point2D[] {
-  const tokens = d.match(/[MmLlHhVvZz]|[-+]?\d*\.?\d+(?:e[-+]?\d+)?/gi) ?? [];
-  const points: Point2D[] = [];
-  let i = 0;
-  let cmd = '';
-  let current = { x: 0, y: 0 };
-
-  while (i < tokens.length) {
-    if (/^[a-z]$/i.test(tokens[i])) cmd = tokens[i++];
-    if (!cmd) break;
-
-    if (cmd === 'M' || cmd === 'L') {
-      const x = Number(tokens[i++]);
-      const y = Number(tokens[i++]);
-      current = { x: (x / 1000) * scale, y: (y / 1000) * scale };
-      points.push(current);
-    } else if (cmd === 'm' || cmd === 'l') {
-      const x = Number(tokens[i++]);
-      const y = Number(tokens[i++]);
-      current = { x: current.x + (x / 1000) * scale, y: current.y + (y / 1000) * scale };
-      points.push(current);
-    } else if (cmd === 'H') {
-      current = { ...current, x: (Number(tokens[i++]) / 1000) * scale };
-      points.push(current);
-    } else if (cmd === 'V') {
-      current = { ...current, y: (Number(tokens[i++]) / 1000) * scale };
-      points.push(current);
-    } else if (cmd === 'Z' || cmd === 'z') {
-      if (points[0]) points.push(points[0]);
-    } else {
-      i++;
-    }
-  }
-
-  return points;
-}
-
-function toHpglPoint(
-  point: Point2D,
-  minX: number,
-  minY: number,
-  heightMm: number,
-  settings: HpglExportSettings,
-): { x: number; y: number } {
-  const xMm = settings.origin === 'board-min' ? point.x - minX : point.x;
-  const yBase = settings.origin === 'board-min' ? point.y - minY : point.y;
-  const yMm = settings.invertY ? heightMm - yBase : yBase;
-  return {
-    x: Math.round(xMm * settings.unitsPerMm),
-    y: Math.round(yMm * settings.unitsPerMm),
-  };
 }
 
 export function padDisplayDiameter(def: PadDefinition): number | null {
