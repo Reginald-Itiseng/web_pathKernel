@@ -242,6 +242,15 @@ describe('kernel end-to-end on motor_driver', () => {
     // Centering op generated with holes outside the board on the axis.
     const centering = job.operations.find((o) => o.kind === 'centering')!;
     expect(centering.stats.plungeCount).toBe(2);
+
+    // Auto stock grows to cover the centering holes — no fit warning, and the
+    // panel is wider than circuit + 2x5mm margin (holes sit 12mm out).
+    expect(job.warnings.filter((w) => w.includes('outside the stock'))).toEqual([]);
+    const outer = job.board3d.boardOutline[0].outer;
+    const xs = outer.map((p) => p.x);
+    const stockWidth = Math.max(...xs) - Math.min(...xs);
+    const circuitWidth = 115.75;
+    expect(stockWidth).toBeGreaterThan(circuitWidth + 2 * 12); // reaches past both holes
   }, 60_000);
 
   it('3D single-sided: only one clad side when one copper layer is loaded', async () => {

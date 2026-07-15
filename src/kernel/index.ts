@@ -138,8 +138,9 @@ export async function runKernelJob(
     }
   }
 
-  // Warn when centering holes fall outside the stock panel.
-  if (centeringRequest && boardBounds) {
+  // Warn when centering holes fall outside an EXPLICITLY sized stock panel
+  // (auto stock grows to cover generated geometry, so it always fits).
+  if (centeringRequest && boardBounds && input.stock) {
     const rect = resolveStockRect(boardBounds, input.stock);
     const holeR = Math.max(0.001, centeringRequest.params.holeDiameterMm / 2);
     const outside = centeringHoleCenters(boardBounds, centeringRequest.params).some(

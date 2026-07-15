@@ -31,6 +31,8 @@ export const FR4_THICKNESS_MM = 1.6;
 export const COPPER_RENDER_THICKNESS_MM = 0.05;
 /** Auto-stock margin around the circuit bounds (mm). */
 export const AUTO_STOCK_MARGIN_MM = 5;
+/** Extra clearance auto stock keeps around generated toolpath geometry (mm). */
+export const AUTO_STOCK_GEOMETRY_PAD_MM = 2;
 
 export interface Board3DInputs {
   layers: KernelJobLayer[];
@@ -77,7 +79,33 @@ export function buildBoard3DModel(inputs: Board3DInputs): Board3DModel {
     };
   }
 
-  const rect = resolveStockRect(bounds, stock);
+  let rect = resolveStockRect(bounds, stock);
+  if (!stock) {
+    // Auto stock grows to cover generated geometry that reaches beyond the
+    // circuit — centering holes, outside-compensated cutouts, pad contours.
+    let gMinX = Infinity;
+    let gMinY = Infinity;
+    let gMaxX = -Infinity;
+    let gMaxY = -Infinity;
+    for (const op of opResults) {
+      const reach = op.effectiveToolDiameterMm / 2 + AUTO_STOCK_GEOMETRY_PAD_MM;
+      for (const line of op.previewPolylines) {
+        for (const p of line) {
+          if (p.x - reach < gMinX) gMinX = p.x - reach;
+          if (p.y - reach < gMinY) gMinY = p.y - reach;
+          if (p.x + reach > gMaxX) gMaxX = p.x + reach;
+          if (p.y + reach > gMaxY) gMaxY = p.y + reach;
+        }
+      }
+    }
+    if (Number.isFinite(gMinX)) {
+      const minX = Math.min(rect.minX, gMinX);
+      const minY = Math.min(rect.minY, gMinY);
+      const maxX = Math.max(rect.minX + rect.width, gMaxX);
+      const maxY = Math.max(rect.minY + rect.height, gMaxY);
+      rect = { minX, minY, width: maxX - minX, height: maxY - minY };
+    }
+  }
   const stockRing: KPoint[] = [
     { x: rect.minX, y: rect.minY },
     { x: rect.minX + rect.width, y: rect.minY },

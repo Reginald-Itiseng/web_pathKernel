@@ -304,6 +304,24 @@ export default function App() {
     return { width: camJob.boardBounds[2] / 1000, height: camJob.boardBounds[3] / 1000 };
   }, [camJob.boardBounds]);
 
+  // Actual stock panel size from the 3D model (auto stock grows to cover
+  // generated geometry like centering holes).
+  const actualStockSizeMm = useMemo(() => {
+    const outer = boardModel?.boardOutline[0]?.outer;
+    if (!outer || outer.length < 3) return null;
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const p of outer) {
+      if (p.x < minX) minX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y > maxY) maxY = p.y;
+    }
+    return { width: maxX - minX, height: maxY - minY };
+  }, [boardModel]);
+
   // Import-time 3D preview: run a no-operations job so the 3D tab shows real
   // copper on the real board outline before any toolpaths are generated.
   const layerPrimitivesKey = useMemo(
@@ -527,6 +545,7 @@ export default function App() {
               stock={stockConfig}
               onStockChange={updateStockConfig}
               circuitSizeMm={circuitSizeMm}
+              actualStockSizeMm={actualStockSizeMm}
             />
           </div>
         )}

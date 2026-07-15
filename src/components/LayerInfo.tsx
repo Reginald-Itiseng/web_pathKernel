@@ -39,6 +39,7 @@ interface Props {
   stock: StockConfig;
   onStockChange: (stock: StockConfig) => void;
   circuitSizeMm: { width: number; height: number } | null;
+  actualStockSizeMm: { width: number; height: number } | null;
 }
 
 export function LayerInfo({
@@ -68,6 +69,7 @@ export function LayerInfo({
   stock,
   onStockChange,
   circuitSizeMm,
+  actualStockSizeMm,
 }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -145,6 +147,7 @@ export function LayerInfo({
           stock={stock}
           onStockChange={onStockChange}
           circuitSizeMm={circuitSizeMm}
+          actualStockSizeMm={actualStockSizeMm}
         />
       </div>
 

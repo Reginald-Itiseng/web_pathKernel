@@ -219,6 +219,8 @@ interface Props {
   onStockChange: (stock: StockConfig) => void;
   /** Circuit bounding box in mm [minX, minY, width, height], for auto stock. */
   circuitSizeMm: { width: number; height: number } | null;
+  /** Actual stock panel size from the 3D model (auto stock can grow). */
+  actualStockSizeMm: { width: number; height: number } | null;
 }
 
 export function CamWorkflowPanel({
@@ -234,6 +236,7 @@ export function CamWorkflowPanel({
   stock,
   onStockChange,
   circuitSizeMm,
+  actualStockSizeMm,
 }: Props) {
   // Machining priority regardless of file load order:
   // 1 registration → 2 top iso → 3 bottom iso (mirrored) → 4 drill → 5 cutout.
@@ -283,7 +286,12 @@ export function CamWorkflowPanel({
       <h3 className="text-xs font-semibold uppercase tracking-widest text-zinc-500 mt-1">
         Stock
       </h3>
-      <StockPanel stock={stock} onChange={onStockChange} circuitSizeMm={circuitSizeMm} />
+      <StockPanel
+        stock={stock}
+        onChange={onStockChange}
+        circuitSizeMm={circuitSizeMm}
+        actualStockSizeMm={actualStockSizeMm}
+      />
 
       {centeringConfig && (
         <>
@@ -357,13 +365,21 @@ function StockPanel({
   stock,
   onChange,
   circuitSizeMm,
+  actualStockSizeMm,
 }: {
   stock: StockConfig;
   onChange: (stock: StockConfig) => void;
   circuitSizeMm: { width: number; height: number } | null;
+  actualStockSizeMm: { width: number; height: number } | null;
 }) {
-  const autoW = circuitSizeMm ? circuitSizeMm.width + 2 * AUTO_STOCK_MARGIN_MM : null;
-  const autoH = circuitSizeMm ? circuitSizeMm.height + 2 * AUTO_STOCK_MARGIN_MM : null;
+  // Prefer the real panel size from the kernel — auto stock grows to cover
+  // generated geometry (centering holes, cutout compensation).
+  const autoW =
+    actualStockSizeMm?.width ??
+    (circuitSizeMm ? circuitSizeMm.width + 2 * AUTO_STOCK_MARGIN_MM : null);
+  const autoH =
+    actualStockSizeMm?.height ??
+    (circuitSizeMm ? circuitSizeMm.height + 2 * AUTO_STOCK_MARGIN_MM : null);
 
   const fits =
     stock.auto ||
@@ -461,18 +477,22 @@ function OperationCard({
           />
         )}
         <button className="flex-1 min-w-0 text-left" onClick={() => setOpen(!open)}>
-          <span className={`text-xs font-medium ${KIND_COLORS[config.kind]}`}>{title}</span>
-          <span className="text-xs text-zinc-500 ml-1.5 truncate">{subtitle}</span>
-          {config.mirror && (
-            <span className="ml-1.5 px-1 rounded bg-sky-950 text-[10px] text-sky-300">mirrored</span>
-          )}
+          <span className="flex items-center gap-1.5">
+            <span className={`text-xs font-medium ${KIND_COLORS[config.kind]}`}>{title}</span>
+            {config.mirror && (
+              <span className="px-1 rounded bg-sky-950 text-[10px] text-sky-300">mirrored</span>
+            )}
+          </span>
+          <span className="block text-[11px] text-zinc-500 truncate leading-tight" title={subtitle}>
+            {subtitle}
+          </span>
         </button>
         <button
           onClick={() => onChange({ ...config, overlayVisible: !config.overlayVisible } as OpConfig)}
           title={config.overlayVisible ? 'Hide toolpaths in previews' : 'Show toolpaths in previews'}
-          className={`text-xs px-1 ${config.overlayVisible ? 'text-zinc-300' : 'text-zinc-600'}`}
+          className={`p-1 rounded transition-colors hover:bg-zinc-700 ${config.overlayVisible ? 'text-zinc-400 hover:text-zinc-100' : 'text-zinc-600 hover:text-zinc-300'}`}
         >
-          {config.overlayVisible ? '👁' : '–'}
+          {config.overlayVisible ? <EyeIcon /> : <EyeOffIcon />}
         </button>
         <span className="text-xs text-zinc-600">{open ? '▾' : '▸'}</span>
       </div>
@@ -770,6 +790,14 @@ function CheckboxField({
       {label}
     </label>
   );
+}
+
+// Same show/hide glyphs as the layer rows (LayerInfo) for visual consistency.
+function EyeIcon() {
+  return <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M1 8s2.5-5 7-5 7 5 7 5-2.5 5-7 5-7-5-7-5Z" /><circle cx="8" cy="8" r="2" /></svg>;
+}
+function EyeOffIcon() {
+  return <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M2 2l12 12M6.5 6.6A2 2 0 0 0 9.4 9.5" /><path d="M4.2 4.3C2.5 5.4 1 8 1 8s2.5 5 7 5c1.3 0 2.5-.4 3.5-1M7 3.1C7.3 3 7.7 3 8 3c4.5 0 7 5 7 5s-.6 1.2-1.7 2.4" /></svg>;
 }
 
 function Chip({ children, tone = 'normal' }: { children: React.ReactNode; tone?: 'normal' | 'warn' }) {
