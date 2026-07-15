@@ -1,5 +1,10 @@
-import React, { useCallback, useRef, useState } from 'react';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
 import { acceptedFileExtensions } from '../utils/layerUtils';
+import {
+  listSampleProjects,
+  loadSampleProjectFiles,
+  type SampleProject,
+} from '../utils/sampleProjects';
 
 const DISPLAY_EXTS = ['.gbr', '.gtl', '.gbl', '.gko', '.drl', '.xln'];
 
@@ -9,7 +14,20 @@ interface Props {
 
 export function GerberDropzone({ onFiles }: Props) {
   const [dragOver, setDragOver] = useState(false);
+  const [samplesOpen, setSamplesOpen] = useState(false);
+  const [loadingSample, setLoadingSample] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const samples = useMemo(listSampleProjects, []);
+
+  const loadSample = useCallback(async (project: SampleProject) => {
+    setLoadingSample(project.name);
+    try {
+      onFiles(await loadSampleProjectFiles(project));
+    } finally {
+      setLoadingSample(null);
+      setSamplesOpen(false);
+    }
+  }, [onFiles]);
 
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
@@ -80,6 +98,44 @@ export function GerberDropzone({ onFiles }: Props) {
             </span>
           ))}
         </div>
+
+        {samples.length > 0 && (
+          <div className="mt-8 pointer-events-auto" onClick={(e) => e.stopPropagation()}>
+            {!samplesOpen ? (
+              <button
+                onClick={() => setSamplesOpen(true)}
+                className="px-4 py-2 text-sm font-medium rounded-lg bg-zinc-800 text-zinc-200 border border-zinc-700 hover:bg-zinc-700 transition-colors"
+              >
+                Load samples
+              </button>
+            ) : (
+              <div className="mx-auto w-72 rounded-lg border border-zinc-700 bg-zinc-900 p-2 text-left">
+                <div className="flex items-center justify-between px-1 mb-1">
+                  <p className="text-xs font-semibold uppercase tracking-widest text-zinc-500">
+                    Sample projects
+                  </p>
+                  <button
+                    onClick={() => setSamplesOpen(false)}
+                    className="text-zinc-500 hover:text-zinc-200 text-sm px-1"
+                  >
+                    ×
+                  </button>
+                </div>
+                {samples.map((project) => (
+                  <button
+                    key={project.name}
+                    disabled={loadingSample != null}
+                    onClick={() => loadSample(project)}
+                    className="w-full flex items-center justify-between px-2 py-1.5 rounded text-sm text-zinc-200 hover:bg-zinc-800 disabled:opacity-50 transition-colors"
+                  >
+                    <span>{loadingSample === project.name ? 'Loading…' : project.name}</span>
+                    <span className="text-xs text-zinc-500">{project.files.length} files</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
