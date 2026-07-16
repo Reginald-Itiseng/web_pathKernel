@@ -148,6 +148,7 @@ export function LayerInfo({
           onStockChange={onStockChange}
           circuitSizeMm={circuitSizeMm}
           actualStockSizeMm={actualStockSizeMm}
+          soloLayerId={soloLayerId}
         />
       </div>
 

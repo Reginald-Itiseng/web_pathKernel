@@ -27,6 +27,7 @@ import {
   addPathIds,
   editHoleDiameter,
   editPadSize,
+  editSinglePadSize,
   editSingleTraceWidth,
   editTraceWidth,
   extractLayerGeometry,
@@ -208,25 +209,31 @@ export default function App() {
 
   const updatePadSize = useCallback((layerId: string, defId: string, newDiameterMm: number) => {
     commitLayers((layers) => layers.map((l) => (
-      l.id === layerId ? rebuildEditedLayer(l, editPadSize(l.result.svgString, defId, newDiameterMm)) : l
+      l.id === layerId ? rebuildEditedLayer(l, editPadSize(l.result.svgString, defId, newDiameterMm, l.result.units)) : l
     )));
   }, [commitLayers, rebuildEditedLayer]);
 
   const updateTraceWidth = useCallback((layerId: string, oldRaw: number, newWidthMm: number) => {
     commitLayers((layers) => layers.map((l) => (
-      l.id === layerId ? rebuildEditedLayer(l, editTraceWidth(l.result.svgString, oldRaw, newWidthMm)) : l
+      l.id === layerId ? rebuildEditedLayer(l, editTraceWidth(l.result.svgString, oldRaw, newWidthMm, l.result.units)) : l
+    )));
+  }, [commitLayers, rebuildEditedLayer]);
+
+  const updateSinglePadSize = useCallback((layerId: string, defId: string, instanceId: string, newDiameterMm: number) => {
+    commitLayers((layers) => layers.map((l) => (
+      l.id === layerId ? rebuildEditedLayer(l, editSinglePadSize(l.result.svgString, defId, instanceId, newDiameterMm, l.result.units)) : l
     )));
   }, [commitLayers, rebuildEditedLayer]);
 
   const updateSingleTrace = useCallback((layerId: string, pathId: string, newWidthMm: number) => {
     commitLayers((layers) => layers.map((l) => (
-      l.id === layerId ? rebuildEditedLayer(l, editSingleTraceWidth(l.result.svgString, pathId, newWidthMm)) : l
+      l.id === layerId ? rebuildEditedLayer(l, editSingleTraceWidth(l.result.svgString, pathId, newWidthMm, l.result.units)) : l
     )));
   }, [commitLayers, rebuildEditedLayer]);
 
   const updateHoleDiameter = useCallback((layerId: string, defId: string, newDiameterMm: number) => {
     commitLayers((layers) => layers.map((l) => (
-      l.id === layerId ? rebuildEditedLayer(l, editHoleDiameter(l.result.svgString, defId, newDiameterMm)) : l
+      l.id === layerId ? rebuildEditedLayer(l, editHoleDiameter(l.result.svgString, defId, newDiameterMm, l.result.units)) : l
     )));
   }, [commitLayers, rebuildEditedLayer]);
 
@@ -281,14 +288,20 @@ export default function App() {
     setCamStale(true);
   }, [state.layers]);
 
-  // Toolpath overlays hidden via each operation card's eye toggle.
+  // Toolpath overlays hidden via each operation card's eye toggle; solo mode
+  // additionally scopes overlays to the soloed layer's own operations.
   const hiddenOpIds = useMemo(() => {
     const hidden = new Set<string>();
     for (const [key, config] of Object.entries(opConfigs)) {
       if (!config.overlayVisible) hidden.add(opIdFor(key, config));
     }
+    if (soloLayerId && camResult) {
+      for (const op of camResult.operations) {
+        if (op.layerId !== soloLayerId) hidden.add(op.id);
+      }
+    }
     return hidden;
-  }, [opConfigs]);
+  }, [opConfigs, soloLayerId, camResult]);
 
   const toggleSolo = useCallback((layerId: string) => {
     setSoloLayerId((prev) => (prev === layerId ? null : layerId));
@@ -557,6 +570,7 @@ export default function App() {
               onAddFiles={handleFiles}
               padHoleMatches={camJob.padHoleAnalysis.matches}
               onPadSizeChange={updatePadSize}
+              onSinglePadSizeChange={updateSinglePadSize}
               onTraceWidthChange={updateTraceWidth}
               onSingleTraceWidthChange={updateSingleTrace}
               onHoleDiameterChange={updateHoleDiameter}

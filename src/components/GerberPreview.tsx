@@ -27,6 +27,7 @@ interface Props {
   onAddFiles: (files: File[]) => void;
   padHoleMatches: PadHoleMatch[];
   onPadSizeChange:             (layerId: string, defId: string,   newDiameterMm: number) => void;
+  onSinglePadSizeChange:       (layerId: string, defId: string, instanceId: string, newDiameterMm: number) => void;
   onTraceWidthChange:          (layerId: string, oldRaw: number,  newWidthMm: number)    => void;
   onSingleTraceWidthChange:    (layerId: string, pathId: string,  newWidthMm: number)    => void;
   onHoleDiameterChange:        (layerId: string, defId: string,   newDiameterMm: number) => void;
@@ -48,7 +49,7 @@ const ZOOM_STEP = 1.25;
 export function GerberPreview({
   layers, onAddFiles,
   padHoleMatches,
-  onPadSizeChange, onTraceWidthChange, onSingleTraceWidthChange, onHoleDiameterChange,
+  onPadSizeChange, onSinglePadSizeChange, onTraceWidthChange, onSingleTraceWidthChange, onHoleDiameterChange,
   geometryHighlight,
   camResult, boardModel,
   soloLayerId, hiddenOpIds,
@@ -573,6 +574,7 @@ export function GerberPreview({
           layers={layers}
           padHoleMatches={padHoleMatches}
           onPadSizeChange={onPadSizeChange}
+          onSinglePadSizeChange={onSinglePadSizeChange}
           onTraceWidthChange={onTraceWidthChange}
           onSingleTraceWidthChange={onSingleTraceWidthChange}
           onHoleDiameterChange={onHoleDiameterChange}

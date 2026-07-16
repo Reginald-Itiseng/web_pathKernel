@@ -21,6 +21,11 @@ export const DEFAULT_VALIDATION_RULES: ValidationRuleSet = {
   outlineClosureToleranceMm: 0.05,
 };
 
+/** Raw SVG units per mm for a layer (gerber-to-svg emits native-unit x1000). */
+function rawPerMm(units: string | null): number {
+  return units === 'in' ? 1000 / 25.4 : 1000;
+}
+
 export function extractLayerGeometry(
   svgString: string,
   layerId: string,
@@ -30,9 +35,9 @@ export function extractLayerGeometry(
   const doc = new DOMParser().parseFromString(svgString, 'image/svg+xml');
   const scale = units === 'in' ? 25.4 : 1;
 
-  const padDefs = extractPadDefs(doc);
+  const padDefs = extractPadDefs(doc, scale);
   const padInstances = extractPadInstances(doc, layerId, scale);
-  const traceClasses = extractTraceClasses(doc, layerId);
+  const traceClasses = extractTraceClasses(doc, layerId, scale);
   const holeInstances: HoleInstance[] =
     layerType === 'drill'
       ? buildHoleInstances(padInstances, padDefs, layerId)
@@ -41,7 +46,7 @@ export function extractLayerGeometry(
   return { layerId, padDefs, padInstances, traceClasses, holeInstances };
 }
 
-function extractPadDefs(doc: Document): PadDefinition[] {
+function extractPadDefs(doc: Document, scale: number): PadDefinition[] {
   const defs = doc.querySelector('defs');
   if (!defs) return [];
 
@@ -51,15 +56,17 @@ function extractPadDefs(doc: Document): PadDefinition[] {
       if (id.includes('_mask-')) return null;
       const markerIndex = id.indexOf('_pad-');
       if (markerIndex < 0) return null;
-      return parsePadDef(child, id, id.slice(markerIndex + '_pad-'.length));
+      return parsePadDef(child, id, id.slice(markerIndex + '_pad-'.length), scale);
     })
     .filter((def): def is PadDefinition => def != null);
 }
 
-function parsePadDef(el: Element, defId: string, toolCode: string): PadDefinition {
+function parsePadDef(el: Element, defId: string, toolCode: string, scale: number): PadDefinition {
   const base: Pick<PadDefinition, 'defId' | 'toolCode'> = { defId, toolCode };
   const nullDims = { diameterMm: null, widthMm: null, heightMm: null, ringStrokeWidthMm: null };
   const tag = el.tagName.toLowerCase();
+  // Raw SVG values are native-units x1000; scale converts inch layers to mm.
+  const toMm = (raw: number) => (raw / 1000) * scale;
 
   if (tag === 'circle') {
     const r = parseFloat(el.getAttribute('r') ?? '0');
@@ -69,17 +76,17 @@ function parsePadDef(el: Element, defId: string, toolCode: string): PadDefinitio
         ...base,
         ...nullDims,
         shape: 'ring',
-        diameterMm: (r * 2) / 1000,
-        ringStrokeWidthMm: parseFloat(sw) / 1000,
+        diameterMm: toMm(r * 2),
+        ringStrokeWidthMm: toMm(parseFloat(sw)),
       };
     }
-    return { ...base, ...nullDims, shape: 'circle', diameterMm: (r * 2) / 1000 };
+    return { ...base, ...nullDims, shape: 'circle', diameterMm: toMm(r * 2) };
   }
 
   if (tag === 'rect') {
     const w = parseFloat(el.getAttribute('width') ?? '0');
     const h = parseFloat(el.getAttribute('height') ?? '0');
-    return { ...base, ...nullDims, shape: 'rect', widthMm: w / 1000, heightMm: h / 1000 };
+    return { ...base, ...nullDims, shape: 'rect', widthMm: toMm(w), heightMm: toMm(h) };
   }
 
   if (tag === 'polygon') return { ...base, ...nullDims, shape: 'polygon' };
@@ -111,7 +118,7 @@ function extractPadInstances(doc: Document, layerId: string, scale: number): Pad
   return result;
 }
 
-function extractTraceClasses(doc: Document, layerId: string): TraceClass[] {
+function extractTraceClasses(doc: Document, layerId: string, scale: number): TraceClass[] {
   const map = new Map<number, TraceClass>();
 
   for (const path of Array.from(doc.querySelectorAll('path[fill="none"]'))) {
@@ -126,7 +133,7 @@ function extractTraceClasses(doc: Document, layerId: string): TraceClass[] {
     } else {
       map.set(raw, {
         strokeWidthRaw: raw,
-        widthMm: raw / 1000,
+        widthMm: (raw / 1000) * scale,
         instanceCount: 1,
         layerId,
         pathIds: [pathId],
@@ -176,7 +183,10 @@ export function addPathIds(svgString: string, layerId: string): string {
   }
 
   for (const path of Array.from(doc.querySelectorAll('path[fill="none"]'))) {
-    const loops = splitPathLoops(path.getAttribute('d') ?? '');
+    // Split the tool's mega-path into stroke subpaths, then regroup the
+    // subpaths that touch — one <path> per CONNECTED trace, so clicking
+    // selects the whole trace rather than a single drawn segment.
+    const loops = groupConnectedLoops(splitPathLoops(path.getAttribute('d') ?? ''));
     if (loops.length <= 1) {
       path.setAttribute('data-path-id', `${layerId}:trace:${pathIdx++}`);
       continue;
@@ -198,14 +208,15 @@ export function addPathIds(svgString: string, layerId: string): string {
 }
 
 function splitPathLoops(pathData: string): string[] {
+  // In SVG path data 'M'/'m' can only ever be a moveto command (letters never
+  // appear inside numbers), so every occurrence starts a new subpath. The old
+  // detector required the M to follow another command letter, which never
+  // happens in gerber-to-svg output ("...L4667 40233M5100...") — so paths were
+  // never split and one <path> held ALL traces of a tool as a single unit.
   const starts: number[] = [];
-  let previousCommand = true;
-
   for (let i = 0; i < pathData.length; i++) {
     const ch = pathData[i];
-    if ((ch === 'M' || ch === 'm') && previousCommand) starts.push(i);
-    if (/[a-zA-Z]/.test(ch)) previousCommand = true;
-    if (/[-+0-9.]/.test(ch)) previousCommand = false;
+    if (ch === 'M' || ch === 'm') starts.push(i);
   }
 
   if (starts.length <= 1) return pathData.trim() ? [pathData.trim()] : [];
@@ -214,32 +225,149 @@ function splitPathLoops(pathData: string): string[] {
     .filter(Boolean);
 }
 
-export function editPadSize(svgString: string, defId: string, newDiameterMm: number): string {
-  const doc = new DOMParser().parseFromString(svgString, 'image/svg+xml');
-  const el = doc.getElementById(defId);
-  if (!el) return svgString;
+/**
+ * Group stroke subpaths into connected traces: subpaths sharing any vertex
+ * belong to the same electrical trace (contiguous runs, T-junctions,
+ * reversed segments). Each group's path data is concatenated so one <path>
+ * element represents one whole trace.
+ */
+function groupConnectedLoops(loops: string[]): string[] {
+  if (loops.length <= 1) return loops;
 
+  const parent = Array.from({ length: loops.length }, (_, i) => i);
+  const find = (x: number): number => {
+    while (parent[x] !== x) {
+      parent[x] = parent[parent[x]];
+      x = parent[x];
+    }
+    return x;
+  };
+  const union = (a: number, b: number): void => {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent[rb] = ra;
+  };
+
+  // Gerber coordinates are exact integers in gerber-to-svg output, so exact
+  // vertex keys suffice for connectivity.
+  const vertexOwner = new Map<string, number>();
+  loops.forEach((loop, idx) => {
+    for (const key of pathVertexKeys(loop)) {
+      const owner = vertexOwner.get(key);
+      if (owner == null) vertexOwner.set(key, idx);
+      else union(owner, idx);
+    }
+  });
+
+  const grouped = new Map<number, string[]>();
+  loops.forEach((loop, idx) => {
+    const root = find(idx);
+    const list = grouped.get(root);
+    if (list) list.push(loop);
+    else grouped.set(root, [loop]);
+  });
+  return [...grouped.values()].map((parts) => parts.join(''));
+}
+
+/** All vertex coordinate keys of a path (absolute M/L/H/V, raw units). */
+function pathVertexKeys(d: string): string[] {
+  const tokens = d.match(/[MmLlHhVvZz]|[-+]?\d*\.?\d+(?:e[-+]?\d+)?/gi) ?? [];
+  const keys: string[] = [];
+  let i = 0;
+  let cmd = '';
+  let x = 0;
+  let y = 0;
+
+  while (i < tokens.length) {
+    if (/^[a-z]$/i.test(tokens[i])) cmd = tokens[i++];
+    if (!cmd) break;
+    if (cmd === 'M' || cmd === 'L') {
+      x = Number(tokens[i++]);
+      y = Number(tokens[i++]);
+      keys.push(`${x},${y}`);
+    } else if (cmd === 'm' || cmd === 'l') {
+      x += Number(tokens[i++]);
+      y += Number(tokens[i++]);
+      keys.push(`${x},${y}`);
+    } else if (cmd === 'H') {
+      x = Number(tokens[i++]);
+      keys.push(`${x},${y}`);
+    } else if (cmd === 'V') {
+      y = Number(tokens[i++]);
+      keys.push(`${x},${y}`);
+    } else {
+      i++;
+    }
+  }
+  return keys;
+}
+
+/** Apply a new size to a pad def element (circle or rect). */
+function resizePadElement(el: Element, newDiameterMm: number, units: string | null): boolean {
   const tag = el.tagName.toLowerCase();
-  const newRawRadius = (newDiameterMm * 1000) / 2;
+  const newRawDiameter = newDiameterMm * rawPerMm(units);
 
   if (tag === 'circle') {
-    el.setAttribute('r', fmtN(newRawRadius));
-  } else if (tag === 'rect') {
+    el.setAttribute('r', fmtN(newRawDiameter / 2));
+    return true;
+  }
+  if (tag === 'rect') {
     const oldW = parseFloat(el.getAttribute('width') ?? '0');
     const oldH = parseFloat(el.getAttribute('height') ?? '0');
     const oldMax = Math.max(oldW, oldH);
-    if (oldMax <= 0) return svgString;
-    const scaleFactor = (newDiameterMm * 1000) / oldMax;
+    if (oldMax <= 0) return false;
+    const scaleFactor = newRawDiameter / oldMax;
     const newW = oldW * scaleFactor;
     const newH = oldH * scaleFactor;
     el.setAttribute('width', fmtN(newW));
     el.setAttribute('height', fmtN(newH));
     el.setAttribute('x', fmtN(-newW / 2));
     el.setAttribute('y', fmtN(-newH / 2));
-  } else {
-    return svgString;
+    return true;
   }
+  return false;
+}
 
+export function editPadSize(
+  svgString: string,
+  defId: string,
+  newDiameterMm: number,
+  units: string | null,
+): string {
+  const doc = new DOMParser().parseFromString(svgString, 'image/svg+xml');
+  const el = doc.getElementById(defId);
+  if (!el || !resizePadElement(el, newDiameterMm, units)) return svgString;
+  return new XMLSerializer().serializeToString(doc);
+}
+
+/**
+ * Resize ONE placed pad only: clone its def with the new size and repoint just
+ * that instance's <use> at the clone. Other pads sharing the def are untouched.
+ */
+export function editSinglePadSize(
+  svgString: string,
+  defId: string,
+  padInstanceId: string,
+  newDiameterMm: number,
+  units: string | null,
+): string {
+  const doc = new DOMParser().parseFromString(svgString, 'image/svg+xml');
+  const def = doc.getElementById(defId);
+  const use = doc.querySelector(`[data-pad-instance-id="${cssEscape(padInstanceId)}"]`);
+  if (!def || !use) return svgString;
+
+  // Unique clone id that keeps the "_pad-" marker so extraction still sees it.
+  let n = 0;
+  let cloneId = `${defId}-s${n}`;
+  while (doc.getElementById(cloneId)) cloneId = `${defId}-s${++n}`;
+
+  const clone = def.cloneNode(true) as Element;
+  clone.setAttribute('id', cloneId);
+  if (!resizePadElement(clone, newDiameterMm, units)) return svgString;
+  def.parentNode?.insertBefore(clone, def.nextSibling);
+
+  if (use.hasAttribute('xlink:href')) use.setAttribute('xlink:href', `#${cloneId}`);
+  if (use.hasAttribute('href')) use.setAttribute('href', `#${cloneId}`);
   return new XMLSerializer().serializeToString(doc);
 }
 
@@ -247,9 +375,10 @@ export function editTraceWidth(
   svgString: string,
   oldStrokeWidthRaw: number,
   newWidthMm: number,
+  units: string | null,
 ): string {
   const doc = new DOMParser().parseFromString(svgString, 'image/svg+xml');
-  const newRaw = fmtN(newWidthMm * 1000);
+  const newRaw = fmtN(newWidthMm * rawPerMm(units));
   let changed = false;
 
   for (const path of Array.from(doc.querySelectorAll('path[fill="none"]'))) {
@@ -263,16 +392,26 @@ export function editTraceWidth(
   return changed ? new XMLSerializer().serializeToString(doc) : svgString;
 }
 
-export function editSingleTraceWidth(svgString: string, pathId: string, newWidthMm: number): string {
+export function editSingleTraceWidth(
+  svgString: string,
+  pathId: string,
+  newWidthMm: number,
+  units: string | null,
+): string {
   const doc = new DOMParser().parseFromString(svgString, 'image/svg+xml');
   const path = doc.querySelector(`path[data-path-id="${cssEscape(pathId)}"]`);
   if (!path) return svgString;
-  path.setAttribute('stroke-width', fmtN(newWidthMm * 1000));
+  path.setAttribute('stroke-width', fmtN(newWidthMm * rawPerMm(units)));
   return new XMLSerializer().serializeToString(doc);
 }
 
-export function editHoleDiameter(svgString: string, defId: string, newDiameterMm: number): string {
-  return editPadSize(svgString, defId, newDiameterMm);
+export function editHoleDiameter(
+  svgString: string,
+  defId: string,
+  newDiameterMm: number,
+  units: string | null,
+): string {
+  return editPadSize(svgString, defId, newDiameterMm, units);
 }
 
 export function matchPadsToHoles(layers: LayerEntry[]): PadHoleMatch[] {

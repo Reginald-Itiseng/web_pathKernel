@@ -221,6 +221,8 @@ interface Props {
   circuitSizeMm: { width: number; height: number } | null;
   /** Actual stock panel size from the 3D model (auto stock can grow). */
   actualStockSizeMm: { width: number; height: number } | null;
+  /** Active solo layer — cards for other layers render dimmed. */
+  soloLayerId: string | null;
 }
 
 export function CamWorkflowPanel({
@@ -237,6 +239,7 @@ export function CamWorkflowPanel({
   onStockChange,
   circuitSizeMm,
   actualStockSizeMm,
+  soloLayerId,
 }: Props) {
   // Machining priority regardless of file load order:
   // 1 registration → 2 top iso → 3 bottom iso (mirrored) → 4 drill → 5 cutout.
@@ -274,6 +277,7 @@ export function CamWorkflowPanel({
         config={config}
         result={resultsByOpId.get(opIdFor(layer.id, config)) ?? null}
         stale={camStale}
+        dimmed={soloLayerId != null && layer.id !== soloLayerId}
         // Mirroring belongs to the bottom side only — the top is milled as-is.
         showMirror={config.kind === 'isolation' && layer.layerType === 'bottom-copper'}
         onChange={(next) => onConfigChange(layer.id, next)}
@@ -306,13 +310,14 @@ export function CamWorkflowPanel({
             config={centeringConfig}
             result={centeringResult}
             stale={camStale}
+            dimmed={soloLayerId != null}
             showMirror={false}
             hideEnable
             onChange={(next) => onConfigChange(CENTERING_KEY, next)}
           />
           <button
             onClick={onGenerateCentering}
-            disabled={busy != null}
+            disabled={busy != null || soloLayerId != null}
             className="w-full px-3 py-1.5 text-sm font-medium text-zinc-900 bg-sky-400 hover:bg-sky-300 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
           >
             {centeringResult ? 'Regenerate centering holes' : 'Drill centering holes'}
@@ -448,6 +453,7 @@ function OperationCard({
   stale,
   showMirror,
   hideEnable,
+  dimmed,
   onChange,
 }: {
   step: number;
@@ -458,12 +464,20 @@ function OperationCard({
   stale: boolean;
   showMirror: boolean;
   hideEnable?: boolean;
+  dimmed?: boolean;
   onChange: (config: OpConfig) => void;
 }) {
   const [open, setOpen] = useState(false);
 
   return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-900/60">
+    <div
+      aria-disabled={dimmed || undefined}
+      className={[
+        'rounded-lg border border-zinc-800 bg-zinc-900/60 transition-opacity',
+        // Solo mode: non-active cards are visually dimmed AND inert.
+        dimmed ? 'opacity-40 grayscale pointer-events-none select-none' : '',
+      ].join(' ')}
+    >
       <div className="flex items-center gap-2 px-3 py-2">
         <span className="w-4 h-4 shrink-0 rounded-full bg-zinc-800 text-zinc-400 text-[10px] font-mono flex items-center justify-center">
           {step}

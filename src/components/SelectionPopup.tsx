@@ -20,6 +20,7 @@ interface Props {
   layers: LayerEntry[];
   padHoleMatches: PadHoleMatch[];
   onPadSizeChange: (layerId: string, defId: string, newDiameterMm: number) => void;
+  onSinglePadSizeChange: (layerId: string, defId: string, instanceId: string, newDiameterMm: number) => void;
   onTraceWidthChange: (layerId: string, oldRaw: number, newWidthMm: number) => void;
   onSingleTraceWidthChange: (layerId: string, pathId: string, newWidthMm: number) => void;
   onHoleDiameterChange: (layerId: string, defId: string, newDiameterMm: number) => void;
@@ -31,6 +32,7 @@ export function SelectionPopup({
   layers,
   padHoleMatches,
   onPadSizeChange,
+  onSinglePadSizeChange,
   onTraceWidthChange,
   onSingleTraceWidthChange,
   onHoleDiameterChange,
@@ -102,6 +104,7 @@ export function SelectionPopup({
             selectedYmm={selection.yMm}
             linkedMatch={linkedMatch}
             onPadSizeChange={onPadSizeChange}
+            onSinglePadSizeChange={onSinglePadSizeChange}
             onHoleDiameterChange={onHoleDiameterChange}
           />
         )}
@@ -143,6 +146,7 @@ function PadEditor({
   selectedYmm,
   linkedMatch,
   onPadSizeChange,
+  onSinglePadSizeChange,
   onHoleDiameterChange,
 }: {
   padDef: PadDefinition;
@@ -154,6 +158,7 @@ function PadEditor({
   selectedYmm: number | undefined;
   linkedMatch: PadHoleMatch | undefined;
   onPadSizeChange: (layerId: string, defId: string, newMm: number) => void;
+  onSinglePadSizeChange: (layerId: string, defId: string, instanceId: string, newMm: number) => void;
   onHoleDiameterChange: (layerId: string, defId: string, newMm: number) => void;
 }) {
   const isDrill = layer.layerType === 'drill';
@@ -161,6 +166,10 @@ function PadEditor({
   const isEditable = padDef.shape === 'circle' || padDef.shape === 'ring' || padDef.shape === 'rect';
   const currentValue = padDef.diameterMm ?? (padDef.widthMm != null ? Math.max(padDef.widthMm, padDef.heightMm ?? 0) : null);
   const instanceCount = padInstances.length;
+  // Default to touching just the clicked pad; "same tool" edits the whole def.
+  const canSingle = selectedInstanceId != null && !isDrill;
+  const [scope, setScope] = useState<'single' | 'group'>(canSingle ? 'single' : 'group');
+  const editingSingle = scope === 'single' && canSingle;
 
   return (
     <div className="flex flex-col gap-2">
@@ -181,14 +190,21 @@ function PadEditor({
       {isEditable && currentValue != null ? (
         <>
           <div className="border-t border-zinc-800 my-0.5" />
+          {canSingle && (
+            <div className="grid grid-cols-2 gap-1 rounded-lg bg-zinc-950/70 p-1">
+              <ScopeButton active={scope === 'single'} onClick={() => setScope('single')}>This pad</ScopeButton>
+              <ScopeButton active={scope === 'group'} onClick={() => setScope('group')}>Same tool</ScopeButton>
+            </div>
+          )}
           <label className="text-xs text-zinc-500">{isDrill ? 'New diameter' : 'New size'} (mm)</label>
           <InlineEdit
             initialMm={currentValue}
             onApply={(v) => {
               if (isDrill) onHoleDiameterChange(layerId, padDef.defId, v);
+              else if (editingSingle) onSinglePadSizeChange(layerId, padDef.defId, selectedInstanceId!, v);
               else onPadSizeChange(layerId, padDef.defId, v);
             }}
-            applyLabel={`Apply to all ${instanceCount}`}
+            applyLabel={editingSingle ? 'Apply pad' : `Apply to all ${instanceCount}`}
           />
         </>
       ) : (
@@ -226,7 +242,7 @@ function TraceEditor({ traceClass, layerId, pathId, onTraceWidthChange, onSingle
       <InfoRow label="Count">{traceClass.instanceCount} traces</InfoRow>
       {pathId && (
         <div className="grid grid-cols-2 gap-1 rounded-lg bg-zinc-950/70 p-1">
-          <ScopeButton active={scope === 'single'} onClick={() => setScope('single')}>This loop</ScopeButton>
+          <ScopeButton active={scope === 'single'} onClick={() => setScope('single')}>This trace</ScopeButton>
           <ScopeButton active={scope === 'group'} onClick={() => setScope('group')}>Same width</ScopeButton>
         </div>
       )}
@@ -238,7 +254,7 @@ function TraceEditor({ traceClass, layerId, pathId, onTraceWidthChange, onSingle
           if (editingSingle) onSingleTraceWidthChange(layerId, pathId, v);
           else onTraceWidthChange(layerId, traceClass.strokeWidthRaw, v);
         }}
-        applyLabel={editingSingle ? 'Apply loop' : `Apply all ${traceClass.instanceCount}`}
+        applyLabel={editingSingle ? 'Apply trace' : `Apply all ${traceClass.instanceCount}`}
       />
     </div>
   );
