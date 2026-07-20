@@ -510,10 +510,10 @@ export default function App() {
 
   return (
     <div className="h-full flex flex-col bg-zinc-950 text-zinc-200">
-      <header className="shrink-0 flex items-center gap-3 px-5 h-12 border-b border-zinc-800 bg-zinc-900">
-        <div className="flex items-center gap-2">
-          <img src={`${import.meta.env.BASE_URL}logo.png`} alt="" className="w-6 h-6 object-contain" />
-          <span className="font-semibold text-zinc-100 tracking-tight">Path Kernel</span>
+      <header className="shrink-0 flex items-center gap-3 px-5 h-16 border-b border-zinc-800 bg-zinc-900">
+        <div className="flex items-center gap-2.5">
+          <img src={`${import.meta.env.BASE_URL}logo.png`} alt="Path Kernel" className="h-12 w-auto object-contain shrink-0" />
+          <span className="font-semibold text-zinc-100 tracking-tight text-lg">Path Kernel</span>
         </div>
         {hasLayers && <ValidationBadge issues={camJob.validationIssues} />}
         <div className="ml-auto flex items-center gap-1">
