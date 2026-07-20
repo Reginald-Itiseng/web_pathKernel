@@ -512,8 +512,8 @@ export default function App() {
     <div className="h-full flex flex-col bg-zinc-950 text-zinc-200">
       <header className="shrink-0 flex items-center gap-3 px-5 h-12 border-b border-zinc-800 bg-zinc-900">
         <div className="flex items-center gap-2">
-          <PcbIcon className="w-5 h-5 text-green-400" />
-          <span className="font-semibold text-zinc-100 tracking-tight">PCB Mill CAM</span>
+          <img src={`${import.meta.env.BASE_URL}logo.png`} alt="" className="w-6 h-6 object-contain" />
+          <span className="font-semibold text-zinc-100 tracking-tight">Path Kernel</span>
         </div>
         {hasLayers && <ValidationBadge issues={camJob.validationIssues} />}
         <div className="ml-auto flex items-center gap-1">
@@ -591,15 +591,6 @@ export default function App() {
   );
 }
 
-function PcbIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <rect x="2" y="2" width="16" height="16" rx="2" />
-      <path d="M6 6h2v2H6zM12 6h2v2h-2zM6 12h2v2H6zM12 12h2v2h-2z" />
-      <path d="M8 7h4M7 8v4M13 8v4M8 13h4" />
-    </svg>
-  );
-}
 
 function HeaderButton({ onClick, disabled, children }: { onClick: () => void; disabled?: boolean; children: React.ReactNode }) {
   return (

@@ -1,0 +1,18 @@
+{
+  "name": "Path Kernel",
+  "short_name": "Path Kernel",
+  "description": "Browser-based PCB isolation/drill/cutout CAM kernel — Gerber in, toolpaths out.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#09090b",
+  "theme_color": "#09090b",
+  "icons": [
+    {
+      "src": "logo.png",
+      "sizes": "683x462",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}

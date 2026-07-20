@@ -72,10 +72,26 @@ export function BoardViewport3D({ model, fallbackBounds, hiddenOpIds }: Props) {
       >
         <color attach="background" args={['#0d1117']} />
 
-        <ambientLight intensity={0.55} />
-        <directionalLight position={[cx + maxDim, cy + maxDim, maxDim * 1.5]} intensity={1.2} />
-        <directionalLight position={[cx - maxDim, cy - maxDim * 0.5, maxDim]} intensity={0.4} />
-        <directionalLight position={[cx, cy, -maxDim * 1.5]} intensity={0.35} />
+        {/* Global fill: hemisphere light illuminates evenly from every view
+            angle (sky above, subtle ground bounce below) so the board reads
+            clearly even at steep top-down angles, without flattening it. */}
+        <hemisphereLight args={['#e8f1ff', '#1a2233', 1.05]} />
+        <ambientLight intensity={0.18} />
+
+        {/* Cinematic key light: a single strong directional "pin" light from
+            a steep offset angle to rake across the copper and pop specular
+            highlights (copper is metalness 0.8). */}
+        <directionalLight
+          position={[cx + maxDim * 0.7, cy - maxDim * 0.9, maxDim * 1.6]}
+          intensity={2.2}
+          color="#fff4e0"
+        />
+        {/* Soft rim/fill from the opposite side keeps shadowed edges legible. */}
+        <directionalLight
+          position={[cx - maxDim * 0.9, cy + maxDim * 0.6, maxDim * 0.8]}
+          intensity={0.45}
+          color="#cfe3ff"
+        />
 
         <Suspense fallback={null}>
           {model ? (
