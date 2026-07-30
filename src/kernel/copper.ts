@@ -15,7 +15,7 @@ import {
   ringDistance,
   roundedRectPoints,
 } from './geom2d';
-import type { KPoint, KPrimitive } from './types';
+import type { DrillFeature, KPoint, KPrimitive } from './types';
 
 /**
  * Convert one primitive into closed polygon rings (mm).
@@ -172,14 +172,19 @@ export function collectNonPadPolygons(primitives: KPrimitive[]): KPoint[][] {
 /** Collect drill hole descriptors from a layer's primitives. */
 export function collectDrillHoles(
   primitives: KPrimitive[],
-): Array<{ x: number; y: number; diameter: number }> {
-  const holes: Array<{ x: number; y: number; diameter: number }> = [];
+): DrillFeature[] {
+  const holes: DrillFeature[] = [];
   for (const primitive of primitives) {
     if (primitive.type === 'drill' && primitive.diameter > 0) {
-      holes.push({ x: primitive.cx, y: primitive.cy, diameter: primitive.diameter });
+      holes.push({ type: 'hole', x: primitive.cx, y: primitive.cy, diameter: primitive.diameter });
     } else if (primitive.type === 'circle' && primitive.flashed && primitive.r > 0) {
       // Excellon layers ingested via tracespace arrive as flashed circles.
-      holes.push({ x: primitive.cx, y: primitive.cy, diameter: primitive.r * 2 });
+      holes.push({ type: 'hole', x: primitive.cx, y: primitive.cy, diameter: primitive.r * 2 });
+    } else if (primitive.type === 'path' && primitive.width > 0 && primitive.segments.length > 0) {
+      // Routed Excellon slots are plotted as a tool-width centerline rather
+      // than a flashed circle. Keep the original arc/line geometry so the
+      // drill operation can machine the complete slot instead of dropping it.
+      holes.push({ type: 'slot', width: primitive.width, segments: primitive.segments });
     }
   }
   return holes;

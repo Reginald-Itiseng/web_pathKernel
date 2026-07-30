@@ -7,14 +7,14 @@
  * tool, bore concentric full-circle passes at the radial stepover.
  */
 import { flattenArc, pathLength } from './geom2d';
-import type { DrillParams, KernelOpResult, KPoint, Stroke } from './types';
+import type { DrillFeature, DrillParams, KernelOpResult, KPoint, Stroke } from './types';
 
 export interface DrillInput {
   id: string;
   layerId: string;
   label: string;
   toolNumber: number;
-  holes: Array<{ x: number; y: number; diameter: number }>;
+  holes: DrillFeature[];
   params: DrillParams;
 }
 
@@ -74,8 +74,33 @@ export function buildDrillToolpaths(input: DrillInput): KernelOpResult {
   let borePassCount = 0;
   let skippedSmallHoles = 0;
   let oversizedHoles = 0;
+  let slotCount = 0;
 
   for (const hole of holes) {
+    if (hole.type === 'slot') {
+      if (hole.width < toolDia - 0.0005 && !params.allowOversizeForSmallHoles) {
+        skippedSmallHoles++;
+        continue;
+      }
+      if (hole.width < toolDia - 0.0005) oversizedHoles++;
+
+      const start = hole.segments[0].start;
+      const plungeEnd: KPoint = { x: start.x + EPSILON_PLUNGE, y: start.y };
+      strokes.push({ type: 'line', start, end: plungeEnd });
+      previewPolylines.push([start, plungeEnd]);
+      for (const segment of hole.segments) {
+        if (segment.type === 'line') {
+          strokes.push(segment);
+          previewPolylines.push([segment.start, segment.end]);
+        } else {
+          strokes.push({ type: 'arc', start: segment.start, end: segment.end, center: segment.center, ccw: segment.ccw });
+          previewPolylines.push(flattenArc(segment.start, segment.end, segment.center, segment.ccw));
+        }
+      }
+      plungeCount++;
+      slotCount++;
+      continue;
+    }
     if (hole.diameter <= 0) continue;
 
     if (hole.diameter < toolDia - 0.0005) {
@@ -132,6 +157,7 @@ export function buildDrillToolpaths(input: DrillInput): KernelOpResult {
       drill_lateral_stepover_pct: stepoverPct.toFixed(3),
       drill_lateral_stepover_mm: stepoverMm.toFixed(6),
       drill_hole_count: String(holes.length),
+      drill_slot_count: String(slotCount),
       drill_plunge_count: String(plungeCount),
       drill_bore_hole_count: String(boreHoleCount),
       drill_bore_pass_count: String(borePassCount),

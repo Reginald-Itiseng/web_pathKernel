@@ -16,7 +16,7 @@
  * All material removal happens here in Clipper — the 3D view just extrudes.
  */
 import { differencePolygons, polysWithHoles, sweptOpenPaths, unionPolygons } from './clip';
-import { circlePoints } from './geom2d';
+import { circlePoints, flattenSegments } from './geom2d';
 import { collectDrillHoles } from './copper';
 import type {
   Board3DModel,
@@ -120,8 +120,15 @@ export function buildBoard3DModel(inputs: Board3DInputs): Board3DModel {
   const drillRings: KPoint[][] = [];
   for (const layer of layers) {
     if (!drilledLayerIds.has(layer.layerId)) continue;
-    for (const hole of collectDrillHoles(layer.primitives)) {
-      if (hole.diameter > 0) drillRings.push(circlePoints(hole.x, hole.y, hole.diameter / 2));
+    for (const feature of collectDrillHoles(layer.primitives)) {
+      if (feature.type === 'hole' && feature.diameter > 0) {
+        drillRings.push(circlePoints(feature.x, feature.y, feature.diameter / 2));
+      } else if (feature.type === 'slot' && feature.width > 0) {
+        const centerline = flattenSegments(feature.segments);
+        if (centerline.length >= 2) {
+          drillRings.push(...sweptOpenPaths([centerline], feature.width / 2));
+        }
+      }
     }
   }
   // Centering (registration) holes are through-holes too: recover the hole

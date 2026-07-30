@@ -97,6 +97,11 @@ export interface DrillParams {
   allowOversizeForSmallHoles: boolean;
 }
 
+/** A circular Excellon hit or a routed Excellon slot. */
+export type DrillFeature =
+  | { type: 'hole'; x: number; y: number; diameter: number }
+  | { type: 'slot'; width: number; segments: KSegment[] };
+
 export type CutoutCompensation = 'outside' | 'inside' | 'onpath';
 
 export interface CutoutParams {
