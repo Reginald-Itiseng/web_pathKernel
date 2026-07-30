@@ -261,6 +261,17 @@ export function CamWorkflowPanel({
   const centeringResult = centeringConfig
     ? resultsByOpId.get(opIdFor(CENTERING_KEY, centeringConfig)) ?? null
     : null;
+  const enabledCamLayers = camLayers.filter((layer) => configs[layer.id].enabled);
+  const mirrorAll = enabledCamLayers.length > 0 && enabledCamLayers.every((layer) => configs[layer.id].mirror);
+
+  const setMirrorAll = (mirror: boolean) => {
+    for (const layer of camLayers) {
+      const config = configs[layer.id];
+      if (config.enabled && config.mirror !== mirror) {
+        onConfigChange(layer.id, { ...config, mirror });
+      }
+    }
+  };
 
   const cards: React.ReactNode[] = [];
   let step = 2;
@@ -279,7 +290,7 @@ export function CamWorkflowPanel({
         stale={camStale}
         dimmed={soloLayerId != null && layer.id !== soloLayerId}
         // Mirroring belongs to the bottom side only — the top is milled as-is.
-        showMirror={config.kind === 'isolation' && layer.layerType === 'bottom-copper'}
+        showMirror={config.kind !== 'centering'}
         onChange={(next) => onConfigChange(layer.id, next)}
       />,
     );
@@ -331,6 +342,15 @@ export function CamWorkflowPanel({
       <h3 className="text-xs font-semibold uppercase tracking-widest text-zinc-500 mt-1">
         {centeringConfig ? 'Machining steps' : 'Operations'}
       </h3>
+
+      <CheckboxField
+        label="Mirror all enabled toolpaths at export"
+        checked={mirrorAll}
+        onChange={setMirrorAll}
+      />
+      <p className="text-[11px] text-zinc-600 -mt-1">
+        Mirrors copper, drill, and cutout paths about the board centerline (or registration axis when used).
+      </p>
 
       {cards}
 
@@ -539,7 +559,7 @@ function OperationCard({
           )}
           {showMirror && (
             <CheckboxField
-              label="Mirror at export (flip about registration axis)"
+              label="Mirror this toolpath at export"
               checked={config.mirror}
               onChange={(mirror) => onChange({ ...config, mirror } as OpConfig)}
             />
