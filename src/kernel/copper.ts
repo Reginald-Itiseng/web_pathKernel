@@ -143,14 +143,26 @@ export function minimumCopperGap(copperRings: KPoint[][]): number | null {
 
 /** Collect flashed pad rings (isolation extra-pad-contours + 3D uses). */
 export function collectPadPolygons(primitives: KPrimitive[]): KPoint[][] {
-  const rings: KPoint[][] = [];
+  return collectPadPolygonGroups(primitives).flat();
+}
+
+/**
+ * Same as `collectPadPolygons`, but keeps each pad primitive's ring(s) as
+ * its own group instead of flattening them together — lets a batched offset
+ * of ALL pads (one Clipper call, still efficient) have its output rings
+ * correlated back to the pad they grew from, e.g. for pad-major toolpath
+ * ordering (isolation.ts extra pad contours).
+ */
+export function collectPadPolygonGroups(primitives: KPrimitive[]): KPoint[][][] {
+  const groups: KPoint[][][] = [];
   for (const primitive of primitives) {
     if (primitive.type === 'drill') continue;
     if (primitive.polarity === 'clear') continue;
     if (!('flashed' in primitive) || !primitive.flashed) continue;
-    rings.push(...primitiveToPolygons(primitive));
+    const rings = primitiveToPolygons(primitive);
+    if (rings.length > 0) groups.push(rings);
   }
-  return rings;
+  return groups;
 }
 
 /**

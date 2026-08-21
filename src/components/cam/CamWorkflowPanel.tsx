@@ -7,6 +7,7 @@ import type {
   CenteringParams,
   CutoutParams,
   DrillParams,
+  HatchingParams,
   IsolationParams,
   KernelJobResult,
   KernelOpResult,
@@ -74,6 +75,20 @@ export const DEFAULT_CUTOUT_PARAMS: CutoutParams = {
   holdingTabWidthMm: 1,
 };
 
+export const DEFAULT_HATCHING_PARAMS: HatchingParams = {
+  toolDiameterMm: 0.8,
+  toolProfile: 'cylindrical',
+  tipDiameterMm: 0,
+  toolAngleDeg: 0,
+  cuttingDepthMm: 0,
+  overlap: 0.5,
+  hatchingMarginMm: 0,
+  hatchAngleDeg: 0,
+  copperKeepoutMarginMm: 0,
+  boundaryMarginMm: 0,
+  joinStyle: 'round',
+};
+
 export const DEFAULT_CENTERING_PARAMS: CenteringParams = {
   orientation: 'horizontal',
   holeCount: 2,
@@ -96,6 +111,7 @@ interface OpConfigBase {
 /** Per-layer operation configuration held in App state. */
 export type OpConfig =
   | (OpConfigBase & { kind: 'isolation'; params: IsolationParams })
+  | (OpConfigBase & { kind: 'hatching'; params: HatchingParams })
   | (OpConfigBase & { kind: 'drill'; params: DrillParams })
   | (OpConfigBase & { kind: 'cutout'; params: CutoutParams })
   | (OpConfigBase & { kind: 'centering'; params: CenteringParams });
@@ -104,15 +120,27 @@ export type OpConfigMap = Record<string, OpConfig>;
 
 const CONFIG_DEFAULTS = { mirror: false, overlayVisible: true };
 
+/** Synthetic key for a copper layer's hatching config — a second, independent
+ *  operation on the same layer, alongside its isolation entry at `layer.id`. */
+export function hatchingKeyFor(layerId: string): string {
+  return `hatching:${layerId}`;
+}
+
+const HATCHING_KEY_PREFIX = 'hatching:';
+
+/** Inverse of `hatchingKeyFor` — the real layer id behind ANY config map key
+ *  (plain layerId, the hatching-prefixed key, or CENTERING_KEY unchanged). */
+export function layerIdForConfigKey(key: string): string {
+  return key.startsWith(HATCHING_KEY_PREFIX) ? key.slice(HATCHING_KEY_PREFIX.length) : key;
+}
+
 /** Seed one op config per CAM-relevant layer, preserving existing entries. */
 export function seedOpConfigs(layers: LayerEntry[], existing: OpConfigMap): OpConfigMap {
   const next: OpConfigMap = {};
   for (const layer of layers) {
     if (existing[layer.id]) {
       next[layer.id] = existing[layer.id];
-      continue;
-    }
-    if (layer.layerType === 'top-copper' || layer.layerType === 'bottom-copper') {
+    } else if (layer.layerType === 'top-copper' || layer.layerType === 'bottom-copper') {
       next[layer.id] = {
         kind: 'isolation',
         enabled: true,
@@ -135,6 +163,20 @@ export function seedOpConfigs(layers: LayerEntry[], existing: OpConfigMap): OpCo
         toolNumber: 3,
         ...CONFIG_DEFAULTS,
         params: { ...DEFAULT_CUTOUT_PARAMS },
+      };
+    }
+
+    // Hatching is a second, independent operation on the same copper layer —
+    // seeded regardless of whether isolation's own entry pre-existed, opt-in
+    // (enabled: false) since it's a heavier, copper-removing operation.
+    if (layer.layerType === 'top-copper' || layer.layerType === 'bottom-copper') {
+      const hatchKey = hatchingKeyFor(layer.id);
+      next[hatchKey] = existing[hatchKey] ?? {
+        kind: 'hatching',
+        enabled: false,
+        toolNumber: 1,
+        ...CONFIG_DEFAULTS,
+        params: { ...DEFAULT_HATCHING_PARAMS },
       };
     }
   }
@@ -192,6 +234,20 @@ export function buildOperationRequests(layers: LayerEntry[], configs: OpConfigMa
       });
     }
   }
+  for (const layer of layers) {
+    const hatchConfig = configs[hatchingKeyFor(layer.id)];
+    if (!hatchConfig || hatchConfig.kind !== 'hatching' || !hatchConfig.enabled || !layer.primitives) {
+      continue;
+    }
+    out.push({
+      id: opIdFor(layer.id, hatchConfig),
+      kind: 'hatching',
+      layerId: layer.id,
+      toolNumber: hatchConfig.toolNumber,
+      mirror: hatchConfig.mirror,
+      params: hatchConfig.params,
+    });
+  }
   return out;
 }
 
@@ -201,6 +257,7 @@ export const WORKFLOW_ORDER: Record<OpConfig['kind'] | 'top-copper' | 'bottom-co
   'top-copper': 1,
   'bottom-copper': 2,
   isolation: 1, // refined per layer below
+  hatching: 1.5,
   drill: 3,
   cutout: 4,
 };
@@ -211,7 +268,6 @@ interface Props {
   onConfigChange: (layerId: string, config: OpConfig) => void;
   onGenerate: () => void;
   onGenerateCentering: () => void;
-  onExport: () => void;
   busy: { stage: string; pct: number } | null;
   camResult: KernelJobResult | null;
   camStale: boolean;
@@ -231,7 +287,6 @@ export function CamWorkflowPanel({
   onConfigChange,
   onGenerate,
   onGenerateCentering,
-  onExport,
   busy,
   camResult,
   camStale,
@@ -294,6 +349,27 @@ export function CamWorkflowPanel({
         onChange={(next) => onConfigChange(layer.id, next)}
       />,
     );
+
+    // Hatching: a second, independent operation on the same copper layer —
+    // rendered right after its isolation card.
+    const hatchKey = hatchingKeyFor(layer.id);
+    const hatchConfig = configs[hatchKey];
+    if (hatchConfig && hatchConfig.kind === 'hatching') {
+      cards.push(
+        <OperationCard
+          key={hatchKey}
+          step={centeringConfig ? step++ : step++ - 1}
+          title="Hatching"
+          subtitle={`${LAYER_LABELS[layer.layerType]} · ${layer.file.name}`}
+          config={hatchConfig}
+          result={resultsByOpId.get(opIdFor(layer.id, hatchConfig)) ?? null}
+          stale={camStale}
+          dimmed={soloLayerId != null && layer.id !== soloLayerId}
+          showMirror
+          onChange={(next) => onConfigChange(hatchKey, next)}
+        />,
+      );
+    }
   }
 
   return (
@@ -356,7 +432,11 @@ export function CamWorkflowPanel({
 
       <button
         onClick={onGenerate}
-        disabled={busy != null || camLayers.every((l) => !configs[l.id]?.enabled)}
+        disabled={
+          busy != null ||
+          (camLayers.every((l) => !configs[l.id]?.enabled) &&
+            camLayers.every((l) => !configs[hatchingKeyFor(l.id)]?.enabled))
+        }
         className="w-full px-3 py-2 text-sm font-medium text-zinc-900 bg-cyan-400 hover:bg-cyan-300 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
       >
         {busy ? `${busy.stage}…` : camResult ? 'Regenerate toolpaths' : 'Generate toolpaths'}
@@ -371,16 +451,6 @@ export function CamWorkflowPanel({
       )}
       {camStale && camResult && !busy && (
         <p className="text-xs text-amber-300">Layers changed — toolpaths are stale. Regenerate before exporting.</p>
-      )}
-
-      {camResult && camResult.operations.length > 0 && (
-        <button
-          onClick={onExport}
-          disabled={busy != null || camStale}
-          className="w-full px-3 py-2 text-sm font-medium text-zinc-900 bg-green-400 hover:bg-green-300 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-        >
-          Export HPGL ({camResult.operations.length} file{camResult.operations.length !== 1 ? 's' : ''})
-        </button>
       )}
     </div>
   );
@@ -459,6 +529,7 @@ function StockPanel({
 
 const KIND_COLORS: Record<OpConfig['kind'], string> = {
   isolation: 'text-fuchsia-300',
+  hatching: 'text-amber-300',
   drill: 'text-cyan-300',
   cutout: 'text-green-300',
   centering: 'text-sky-300',
@@ -535,6 +606,12 @@ function OperationCard({
         <div className="px-3 pb-3 border-t border-zinc-800/60 pt-2">
           {config.kind === 'isolation' && (
             <IsolationParamsForm
+              params={config.params}
+              onChange={(params) => onChange({ ...config, params })}
+            />
+          )}
+          {config.kind === 'hatching' && (
+            <HatchingParamsForm
               params={config.params}
               onChange={(params) => onChange({ ...config, params })}
             />
@@ -657,6 +734,50 @@ function IsolationParamsForm({
       />
       <p className="text-[11px] text-zinc-500 font-mono mt-0.5">
         D<sub>eff</sub> {tool.effectiveDiameterMm.toFixed(3)} mm · step {tool.hatchingMarginMm.toFixed(3)} mm
+      </p>
+    </div>
+  );
+}
+
+function HatchingParamsForm({
+  params,
+  onChange,
+}: {
+  params: HatchingParams;
+  onChange: (params: HatchingParams) => void;
+}) {
+  const tool = deriveIsolationToolGeometry({ ...params, traceMarginMm: 0 });
+  return (
+    <div className="flex flex-col gap-1.5">
+      <SelectField
+        label="Tool profile"
+        value={params.toolProfile}
+        options={[
+          { value: 'conical', label: 'Conical (V-bit)' },
+          { value: 'cylindrical', label: 'Cylindrical' },
+        ]}
+        onChange={(v) => onChange({ ...params, toolProfile: v as HatchingParams['toolProfile'] })}
+      />
+      {params.toolProfile === 'conical' ? (
+        <>
+          <NumberField label="Tip Ø (mm)" value={params.tipDiameterMm} step={0.01} min={0} onChange={(v) => onChange({ ...params, tipDiameterMm: v })} />
+          <NumberField label="V angle (°)" value={params.toolAngleDeg} step={1} min={0} onChange={(v) => onChange({ ...params, toolAngleDeg: v })} />
+          <NumberField label="Cut depth (mm)" value={params.cuttingDepthMm} step={0.01} min={0} onChange={(v) => onChange({ ...params, cuttingDepthMm: v })} />
+        </>
+      ) : (
+        <>
+          <NumberField label="Tool Ø (mm)" value={params.toolDiameterMm} step={0.05} min={0.01} onChange={(v) => onChange({ ...params, toolDiameterMm: v })} />
+          <NumberField label="Overlap (0–0.9)" value={params.overlap} step={0.05} min={0} max={0.9} onChange={(v) => onChange({ ...params, overlap: v })} />
+        </>
+      )}
+      <NumberField label="Hatch angle (°)" value={params.hatchAngleDeg} step={5} onChange={(v) => onChange({ ...params, hatchAngleDeg: v })} />
+      <NumberField label="Copper keepout margin (mm)" value={params.copperKeepoutMarginMm} step={0.05} min={0} onChange={(v) => onChange({ ...params, copperKeepoutMarginMm: v })} />
+      <NumberField label="Boundary margin (mm)" value={params.boundaryMarginMm} step={0.5} min={0} onChange={(v) => onChange({ ...params, boundaryMarginMm: v })} />
+      <p className="text-[11px] text-zinc-500">
+        Clears copper outside the isolation keepout, constrained to the board cutout domain when available.
+      </p>
+      <p className="text-[11px] text-zinc-500 font-mono mt-0.5">
+        D<sub>eff</sub> {tool.effectiveDiameterMm.toFixed(3)} mm · row spacing {tool.hatchingMarginMm.toFixed(3)} mm
       </p>
     </div>
   );

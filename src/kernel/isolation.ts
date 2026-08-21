@@ -2,11 +2,28 @@
  * Isolation routing: multi-pass buffered offsets around true copper geometry.
  * Port of reference/PathKernel/app/core/isolation.py `build_isolation_layer`.
  */
+import {
+  DEFAULT_ARC_FIT_OPTIONS,
+  fitArcsToClosedRing,
+  fitArcsToOpenPath,
+  ringPieceToStroke,
+} from './arcFit';
 import { clipOpenPathsOutside, offsetPolygons, sweptOpenPaths, unionPolygons } from './clip';
 import { deriveIsolationToolGeometry } from './cncParams';
-import { collectNonPadPolygons, collectPadPolygons, minimumCopperGap } from './copper';
-import { pathLength } from './geom2d';
+import { collectNonPadPolygons, collectPadPolygonGroups, minimumCopperGap } from './copper';
+import { flattenStroke, pathLength } from './geom2d';
+import {
+  centroidOfRing,
+  chainInFixedOrder,
+  nearestCentroidIndex,
+  reorderForTravel,
+  strokeEnd,
+  unitFromStrokes,
+  type TravelUnit,
+} from './pathOrder';
 import type { IsolationParams, KernelOpResult, KPoint, KPrimitive, Stroke } from './types';
+
+const ORIGIN: KPoint = { x: 0, y: 0 };
 
 export interface IsolationInput {
   id: string;
@@ -45,7 +62,9 @@ export function buildIsolation(input: IsolationInput): KernelOpResult {
   const strokes: Stroke[] = [];
   const previewPolylines: KPoint[][] = [];
   let skippedPasses = 0;
+  let curPos: KPoint = ORIGIN;
 
+  const mainUnits: TravelUnit[] = [];
   for (let i = 0; i < passes; i++) {
     const offset = offsetStart + i * step;
     if (
@@ -63,12 +82,23 @@ export function buildIsolation(input: IsolationInput): KernelOpResult {
     const rings = isolationRings(copper, offset, params);
     for (const ring of rings) {
       if (ring.length < 3) continue;
-      // Close the ring explicitly so exports and previews trace a full loop.
-      const closed = [...ring, ring[0]];
-      strokes.push({ type: 'polyline', points: closed });
-      previewPolylines.push(closed);
+      // Re-fit Clipper's tessellated round joins into native arcs (drilling
+      // already does this natively; this is the isolation-side equivalent —
+      // see arcFit.ts) so round pad contours cut as one AA sweep instead of
+      // hundreds of PD line segments. Straight edges pass through unchanged.
+      const pieces = fitArcsToClosedRing(ring, DEFAULT_ARC_FIT_OPTIONS);
+      mainUnits.push(unitFromStrokes(pieces.map(ringPieceToStroke)));
     }
   }
+  // Nearest-neighbor sequencing across every ring from every pass — rings
+  // from adjacent passes around the same feature are naturally close to
+  // each other, so this already tends to finish one area before moving on,
+  // without needing pass-specific grouping the way pad contours do below.
+  for (const s of reorderForTravel(mainUnits, curPos)) {
+    strokes.push(s);
+    previewPolylines.push(flattenStroke(s));
+  }
+  if (strokes.length > 0) curPos = strokeEnd(strokes[strokes.length - 1]);
 
   // ── Extra pad contours ─────────────────────────────────────────────────
   // Additional exterior rings around flashed pads ONLY, generated AFTER the
@@ -78,8 +108,14 @@ export function buildIsolation(input: IsolationInput): KernelOpResult {
   const extraPadContours = Math.max(0, Math.floor(params.extraPadContours));
   let padContourStrokes = 0;
   if (extraPadContours > 0) {
-    const padRings = unionPolygons(collectPadPolygons(input.primitives));
-    if (padRings.length > 0) {
+    // Grouped per-pad (not unioned) so each pass's batched offset output can
+    // be correlated back to the pad it grew from, by nearest centroid — the
+    // actual offset/clip geometry below is computed from the SAME unioned
+    // ring soup as before (unchanged correctness), the grouping is only used
+    // to decide emission order.
+    const padGroups = collectPadPolygonGroups(input.primitives);
+    const padRings = unionPolygons(padGroups.flat());
+    if (padRings.length > 0 && padGroups.length > 0) {
       const toolRadius = Math.max(0.001, effectiveRadius);
       const nonPadRings = unionPolygons(collectNonPadPolygons(input.primitives));
       // Keep pad contours clear of other copper features (traces, zones).
@@ -89,6 +125,12 @@ export function buildIsolation(input: IsolationInput): KernelOpResult {
           : [];
       let existingSwept =
         previewPolylines.length > 0 ? sweptOpenPaths(previewPolylines, toolRadius) : [];
+
+      const padCentroids = padGroups.map((g) => centroidOfRing(g.flat()));
+      // [padIdx] -> this pad's kept fragments, appended pass by pass below so
+      // they end up in fixed outermost→innermost order — the order the user
+      // wants preserved within one pad's contour set.
+      const perPadUnits: TravelUnit[][] = padGroups.map(() => []);
 
       const start = offsetStart + passes * step;
       for (let i = 0; i < extraPadContours; i++) {
@@ -115,14 +157,32 @@ export function buildIsolation(input: IsolationInput): KernelOpResult {
         const kept = candidates.filter((line) => line.length >= 2 && pathLength(line) > 1e-6);
         if (kept.length === 0) continue;
         for (const line of kept) {
-          strokes.push({ type: 'polyline', points: line });
-          previewPolylines.push(line);
+          // These are open fragments (post-keepout clipping), not closed
+          // rings — use the open-path fitter.
+          const padIdx = nearestCentroidIndex(line, padCentroids);
+          const pieces = fitArcsToOpenPath(line, DEFAULT_ARC_FIT_OPTIONS);
+          perPadUnits[padIdx].push(unitFromStrokes(pieces.map(ringPieceToStroke)));
           padContourStrokes++;
         }
         const newSwept = sweptOpenPaths(kept, toolRadius);
         existingSwept =
           existingSwept.length > 0 ? unionPolygons([...existingSwept, ...newSwept]) : newSwept;
       }
+
+      // Bundle each pad's fragments (already in fixed outermost→innermost
+      // order) into one compound unit, then nearest-neighbor across pads —
+      // finish one pad's whole contour set before moving to the next-nearest
+      // pad, continuing from wherever the main isolation pass left the tool.
+      const padUnits: TravelUnit[] = [];
+      for (let p = 0; p < perPadUnits.length; p++) {
+        if (perPadUnits[p].length === 0) continue;
+        padUnits.push(chainInFixedOrder(perPadUnits[p], padCentroids[p]));
+      }
+      for (const s of reorderForTravel(padUnits, curPos)) {
+        strokes.push(s);
+        previewPolylines.push(flattenStroke(s));
+      }
+      if (strokes.length > 0) curPos = strokeEnd(strokes[strokes.length - 1]);
     }
   }
 

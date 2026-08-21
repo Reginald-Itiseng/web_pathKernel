@@ -7,9 +7,10 @@ import { buildBoard3DModel, resolveStockRect } from './board3d';
 import { buildCenteringHoles, centeringHoleCenters, centeringMirrorAxis } from './centering';
 import { initClipper } from './clip';
 import { buildCopperGeometry, collectDrillHoles, minimumCopperGap } from './copper';
-import { buildCutout, extractCutoutLoops } from './cutout';
+import { buildCutout, extractCutoutLoops, loopsToDomain } from './cutout';
 import { buildDrillToolpaths } from './drilling';
 import { mergeBounds, ringBounds } from './geom2d';
+import { buildHatching } from './hatching';
 import { buildIsolation } from './isolation';
 import type {
   KernelJobInput,
@@ -18,9 +19,19 @@ import type {
   KernelProgress,
   KPoint,
   MirrorAxis,
+  OperationKind,
 } from './types';
 
 export type { KernelJobInput, KernelJobResult } from './types';
+
+/** Machining order: centering → isolation → hatching → cutout → drill. */
+const OP_PRIORITY: Record<OperationKind, number> = {
+  centering: 0,
+  isolation: 1,
+  hatching: 2,
+  cutout: 3,
+  drill: 4,
+};
 
 export async function runKernelJob(
   input: KernelJobInput,
@@ -48,6 +59,20 @@ export async function runKernelJob(
   // Board bounds: real outline loops when available, else union layer bounds.
   const boardBounds = computeBoardBounds(input);
 
+  // Board cutout domain (ring soup: outer+holes together) for hatching's
+  // clear-domain constraint — undefined when there's no board-outline layer,
+  // in which case buildHatching falls back to a bbox+margin domain.
+  const boardOutlineLayer = input.layers.find((l) => l.role === 'board-outline');
+  let boardDomainRings: KPoint[][] | undefined;
+  if (boardOutlineLayer) {
+    try {
+      const domain = loopsToDomain(extractCutoutLoops(boardOutlineLayer.primitives));
+      boardDomainRings = domain.flatMap((p) => [p.outer, ...p.holes]);
+    } catch {
+      // fall through — hatching uses its own bbox fallback
+    }
+  }
+
   // Mirror axis: centering op axis when one is requested, else the vertical
   // centerline of the board (common left↔right flip).
   let mirrorAxis: MirrorAxis | null = null;
@@ -63,10 +88,17 @@ export async function runKernelJob(
     );
   }
 
+  // Stable priority ordering — nothing upstream (buildOperationRequests just
+  // follows the layers array) enforces a sane machining order otherwise, and
+  // hatching in particular must run after isolation cuts its keepout channel.
+  const orderedOperations = [...input.operations].sort(
+    (a, b) => OP_PRIORITY[a.kind] - OP_PRIORITY[b.kind],
+  );
+
   const operations: KernelOpResult[] = [];
-  const total = Math.max(1, input.operations.length);
-  for (let i = 0; i < input.operations.length; i++) {
-    const request = input.operations[i];
+  const total = Math.max(1, orderedOperations.length);
+  for (let i = 0; i < orderedOperations.length; i++) {
+    const request = orderedOperations[i];
     const layer = layersById.get(request.layerId);
     const pctBase = 0.15 + (0.65 * i) / total;
     try {
@@ -107,6 +139,27 @@ export async function runKernelJob(
             label: 'Centering holes',
             toolNumber: request.toolNumber,
             boardBounds,
+            params: request.params,
+          }),
+        );
+      } else if (request.kind === 'hatching') {
+        report(`Hatching: ${request.layerId}`, pctBase);
+        const copper = copperByLayer.get(request.layerId) ?? buildCopperGeometry(layer.primitives);
+        // Prior same-layer ops already pushed this run (isolation, thanks to
+        // the priority sort above) — kept as an additional keepout so
+        // hatching doesn't recut isolation's own channel.
+        const existingToolpathPreview = operations
+          .filter((op) => op.layerId === request.layerId)
+          .flatMap((op) => op.previewPolylines);
+        operations.push(
+          buildHatching({
+            id: request.id,
+            layerId: request.layerId,
+            label: `Hatching — ${request.layerId}`,
+            toolNumber: request.toolNumber,
+            copper,
+            boardDomainRings,
+            existingToolpathPreview,
             params: request.params,
           }),
         );

@@ -22,6 +22,7 @@ const FALLBACK_THICKNESS = 1.6;
 
 const TOOLPATH_COLORS: Record<OperationKind, string> = {
   isolation: '#f0f',
+  hatching: '#f0b429',
   drill: '#22d3ee',
   cutout: '#4ade80',
   centering: '#79c0ff',
@@ -80,7 +81,11 @@ export function BoardViewport3D({ model, fallbackBounds, hiddenOpIds }: Props) {
 
         {/* Cinematic key light: a single strong directional "pin" light from
             a steep offset angle to rake across the copper and pop specular
-            highlights (copper is metalness 0.8). */}
+            highlights (copper is metalness 0.8). Fixed in world space, like
+            every light here — it's the camera that orbits, not the lights —
+            but a one-sided key light still leaves the far face dark once you
+            rotate to look at it, so it's mirrored below to the -Z key light
+            a few lines down. */}
         <directionalLight
           position={[cx + maxDim * 0.7, cy - maxDim * 0.9, maxDim * 1.6]}
           intensity={2.2}
@@ -89,6 +94,19 @@ export function BoardViewport3D({ model, fallbackBounds, hiddenOpIds }: Props) {
         {/* Soft rim/fill from the opposite side keeps shadowed edges legible. */}
         <directionalLight
           position={[cx - maxDim * 0.9, cy + maxDim * 0.6, maxDim * 0.8]}
+          intensity={0.45}
+          color="#cfe3ff"
+        />
+        {/* Mirrored key + rim pair on the -Z side, so the underside reads
+            just as clearly as the top once you rotate the board around —
+            same rake angle and colors, reflected through the board plane. */}
+        <directionalLight
+          position={[cx + maxDim * 0.7, cy - maxDim * 0.9, -maxDim * 1.6]}
+          intensity={2.2}
+          color="#fff4e0"
+        />
+        <directionalLight
+          position={[cx - maxDim * 0.9, cy + maxDim * 0.6, -maxDim * 0.8]}
           intensity={0.45}
           color="#cfe3ff"
         />

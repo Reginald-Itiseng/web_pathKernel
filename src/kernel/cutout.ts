@@ -6,18 +6,27 @@
  * The shapely linemerge+polygonize step is replaced with endpoint-snapped
  * chain walking; the healed fallback (buffer out then in) uses Clipper sweeps.
  */
+import { DEFAULT_ARC_FIT_OPTIONS, fitArcsToOpenPath, ringPieceToStroke } from './arcFit';
 import { differencePolygons, offsetPolygons, sweptOpenPaths, unionPolygons } from './clip';
 import {
   dedupePoints,
   distance,
   ensureCcw,
   flattenSegments,
+  flattenStroke,
   lineSubstring,
   pathLength,
   pointInRing,
   pointsClose,
   ringArea,
 } from './geom2d';
+import {
+  centroidOfRing,
+  chainInFixedOrder,
+  reorderForTravel,
+  unitFromStrokes,
+  type TravelUnit,
+} from './pathOrder';
 import type {
   CutoutParams,
   KernelOpResult,
@@ -69,14 +78,29 @@ export function buildCutout(input: CutoutInput): KernelOpResult {
 
   const strokes: Stroke[] = [];
   const previewPolylines: KPoint[][] = [];
+  // Each loop's tab-split pieces are chained in their existing (already
+  // contiguous) order — only their own entry points are optimized — then
+  // whole loops are nearest-neighbor sequenced against each other so the
+  // tool finishes one loop before jumping to the next-closest one.
+  const loopUnits: TravelUnit[] = [];
   for (const ring of compensatedPaths) {
     const closed = [...ring, ring[0]];
-    const pieces = splitPathForHoldingTabs(closed, tabCount, tabGap);
-    for (const piece of pieces) {
-      if (piece.length < 2) continue;
-      strokes.push({ type: 'polyline', points: piece });
-      previewPolylines.push(piece);
+    const tabPieces = splitPathForHoldingTabs(closed, tabCount, tabGap);
+    const pieceUnits: TravelUnit[] = [];
+    for (const tabPiece of tabPieces) {
+      if (tabPiece.length < 2) continue;
+      // Re-fit rounded-corner facets into native arcs (see arcFit.ts) so
+      // outside/inside compensation with round joins cuts as AA sweeps
+      // instead of many short PD segments.
+      const pieces = fitArcsToOpenPath(tabPiece, DEFAULT_ARC_FIT_OPTIONS);
+      pieceUnits.push(unitFromStrokes(pieces.map(ringPieceToStroke)));
     }
+    if (pieceUnits.length === 0) continue;
+    loopUnits.push(chainInFixedOrder(pieceUnits, centroidOfRing(ring)));
+  }
+  for (const s of reorderForTravel(loopUnits, { x: 0, y: 0 })) {
+    strokes.push(s);
+    previewPolylines.push(flattenStroke(s));
   }
   if (strokes.length === 0) {
     throw new Error('Generated cutout toolpath is empty.');

@@ -32,7 +32,6 @@ interface Props {
   onOpConfigChange: (layerId: string, config: OpConfig) => void;
   onGenerate: () => void;
   onGenerateCentering: () => void;
-  onExport: () => void;
   kernelBusy: KernelProgress | null;
   camResult: KernelJobResult | null;
   camStale: boolean;
@@ -62,7 +61,6 @@ export function LayerInfo({
   onOpConfigChange,
   onGenerate,
   onGenerateCentering,
-  onExport,
   kernelBusy,
   camResult,
   camStale,
@@ -140,7 +138,6 @@ export function LayerInfo({
           onConfigChange={onOpConfigChange}
           onGenerate={onGenerate}
           onGenerateCentering={onGenerateCentering}
-          onExport={onExport}
           busy={kernelBusy}
           camResult={camResult}
           camStale={camStale}

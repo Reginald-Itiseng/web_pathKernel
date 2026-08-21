@@ -111,7 +111,31 @@ export interface CutoutParams {
   holdingTabWidthMm: number;
 }
 
-export type OperationKind = 'isolation' | 'drill' | 'cutout' | 'centering';
+/**
+ * Copper clearing (hatching): mills away copper OUTSIDE the isolation
+ * keepout — everything isolation's thin channel doesn't already protect.
+ * Port of reference/PathKernel/app/core/hatching.py `HatchingParams`.
+ */
+export interface HatchingParams {
+  toolDiameterMm: number;
+  toolProfile: ToolProfile;
+  tipDiameterMm: number;
+  toolAngleDeg: number;
+  cuttingDepthMm: number;
+  /** 0..0.999 — fraction of tool overlap between hatch rows (cylindrical). */
+  overlap: number;
+  /** Explicit row spacing (mm); <= 0 derives automatically (same math as isolation's step-over). */
+  hatchingMarginMm: number;
+  /** Raster angle, degrees (0 = horizontal rows). */
+  hatchAngleDeg: number;
+  /** Extra clearance beyond the effective tool radius when avoiding copper. */
+  copperKeepoutMarginMm: number;
+  /** Extra margin around the clear domain when no board-outline layer is available. */
+  boundaryMarginMm: number;
+  joinStyle: JoinStyle;
+}
+
+export type OperationKind = 'isolation' | 'hatching' | 'drill' | 'cutout' | 'centering';
 
 export type CenteringOrientation = 'horizontal' | 'vertical';
 
@@ -149,6 +173,7 @@ interface OpRequestBase {
 
 export type OperationRequest =
   | (OpRequestBase & { kind: 'isolation'; params: IsolationParams })
+  | (OpRequestBase & { kind: 'hatching'; params: HatchingParams })
   | (OpRequestBase & { kind: 'drill'; params: DrillParams })
   | (OpRequestBase & { kind: 'cutout'; params: CutoutParams })
   | (OpRequestBase & { kind: 'centering'; params: CenteringParams });

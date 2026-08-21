@@ -7,11 +7,13 @@
  *    every side that has a copper layer loaded (single/double sided).
  *  - Isolation generated: swept tool channels are subtracted from the clad,
  *    engraving the circuit into the copper.
+ *  - Hatching generated: its swept copper-clearing sweep is subtracted from
+ *    the clad the same way — the whole raster-cleared area reads as exposed
+ *    substrate, not just isolation's thin channel.
  *  - Drill generated: through-holes punched in clad + substrate.
  *  - Cutout generated: the cutout channel is milled THROUGH the stock
  *    (substrate + both clads); the gaps in the path are the retaining tabs
  *    that keep the board attached to the stock.
- *  - Hatching (phase 2) will subtract the cleared regions the same way.
  *
  * All material removal happens here in Clipper — the 3D view just extrudes.
  */
@@ -175,7 +177,8 @@ export function buildBoard3DModel(inputs: Board3DInputs): Board3DModel {
       clad = differencePolygons(clad, throughCuts);
     }
     for (const op of opResults) {
-      if (op.kind !== 'isolation' || op.layerId !== layer.layerId) continue;
+      if (op.layerId !== layer.layerId) continue;
+      if (op.kind !== 'isolation' && op.kind !== 'hatching') continue;
       const channelRadius = op.effectiveToolDiameterMm / 2;
       if (channelRadius <= 0 || op.previewPolylines.length === 0) continue;
       const channels = sweptOpenPaths(op.previewPolylines, channelRadius);

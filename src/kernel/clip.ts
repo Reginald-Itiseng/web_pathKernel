@@ -26,8 +26,38 @@ import type { KPoint, JoinStyle, PolyWithHoles } from './types';
 export const SCALE = 1e5;
 /** Max board extent we accept before scaling becomes unsafe (mm). */
 const MAX_EXTENT_MM = 10_000;
-/** Arc flattening tolerance for round joins, in integer units (0.005 mm). */
-const ARC_TOLERANCE = 0.005 * SCALE;
+/**
+ * Arc flattening tolerance for round joins/caps, in integer units.
+ *
+ * A round join's radius is always the offset magnitude itself, so a FIXED
+ * absolute tolerance is wrong at both ends of the scale: at small deltas
+ * (typical for isolation offsets, ~0.05-0.5mm) a fixed 0.005mm tolerance is
+ * coarse enough that Clipper collapses a full 90° corner into a single
+ * facet — just its start and end point, no interior points at all. That
+ * starves any downstream arc re-fitting (arcFit.ts) of enough geometry to
+ * recognize the corner on its own; it ends up spanning into neighboring
+ * straight edges to find enough points, and can land on a spurious
+ * "compromise" arc that blends two unrelated features (confirmed against a
+ * real sharp-cornered pad: fixed tolerance → 2 points/corner → misfit;
+ * delta-scaled tolerance → 7-8 points/corner → correct fit every time).
+ *
+ * Scaling tolerance to the delta guarantees a healthy minimum facet count
+ * per corner (~24 facets worth of resolution per full circle) regardless of
+ * how small the offset is, while never exceeding the original fixed value —
+ * so nothing gets coarser than before for larger deltas (round pad
+ * boundaries, later isolation passes, etc.).
+ */
+const ARC_TOLERANCE_DELTA_FRACTION = 0.0085;
+const ARC_TOLERANCE_FLOOR_MM = 0.0005;
+const ARC_TOLERANCE_CEILING_MM = 0.005;
+
+function arcToleranceFor(deltaMm: number): number {
+  const mm = Math.min(
+    ARC_TOLERANCE_CEILING_MM,
+    Math.max(ARC_TOLERANCE_FLOOR_MM, Math.abs(deltaMm) * ARC_TOLERANCE_DELTA_FRACTION),
+  );
+  return mm * SCALE;
+}
 
 type IntPoint = { x: number; y: number };
 
@@ -159,7 +189,7 @@ export function offsetPolygons(rings: KPoint[][], deltaMm: number, join: JoinSty
   if (data.length === 0) return [];
   const result = lib().offsetToPaths({
     delta: Math.round(deltaMm * SCALE),
-    arcTolerance: ARC_TOLERANCE,
+    arcTolerance: arcToleranceFor(deltaMm),
     offsetInputs: [
       {
         data,
@@ -192,7 +222,7 @@ export function sweptOpenPaths(polylines: KPoint[][], radiusMm: number): KPoint[
   if (data.length === 0) return [];
   const result = lib().offsetToPaths({
     delta: Math.round(radiusMm * SCALE),
-    arcTolerance: ARC_TOLERANCE,
+    arcTolerance: arcToleranceFor(radiusMm),
     offsetInputs: [
       {
         data,

@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ExportModal, type ExportFile, type ExportFormatOption } from './components/ExportModal';
 import { GerberDropzone } from './components/GerberDropzone';
 import { GerberPreview } from './components/GerberPreview';
 import { LayerInfo } from './components/LayerInfo';
@@ -8,6 +9,8 @@ import {
   buildOperationRequests,
   CENTERING_KEY,
   DEFAULT_STOCK_CONFIG,
+  hatchingKeyFor,
+  layerIdForConfigKey,
   opIdFor,
   resolveStockSettings,
   seedOpConfigs,
@@ -19,10 +22,18 @@ import { AUTO_STOCK_MARGIN_MM } from './kernel/board3d';
 import { parseGerber, type LayerEntry } from './utils/gerberUtils';
 import { LAYER_COLORS, detectLayerType } from './utils/layerUtils';
 import { buildCamJob, buildImportReport, DEFAULT_DRILL_SETTINGS } from './utils/camUtils';
-import { buildKernelLayers, ingestLayerPrimitives } from './utils/kernelBridge';
+import {
+  buildKernelLayers,
+  editKernelHoleDiameter,
+  editKernelPadSize,
+  editKernelSinglePadSize,
+  editKernelSingleTraceWidth,
+  editKernelTraceWidth,
+  ingestLayerPrimitives,
+} from './utils/kernelBridge';
 import { runKernelJobInWorker } from './workers/kernelClient';
 import { exportHpgl } from './kernel/hpgl';
-import type { Board3DModel, KernelJobResult, KernelProgress } from './kernel/types';
+import type { Board3DModel, KernelJobResult, KernelProgress, LayerPrimitives } from './kernel/types';
 import {
   addPathIds,
   editHoleDiameter,
@@ -61,6 +72,7 @@ export default function App() {
   const [camStale, setCamStale] = useState(false);
   const [kernelBusy, setKernelBusy] = useState<KernelProgress | null>(null);
   const [boardModel, setBoardModel] = useState<Board3DModel | null>(null);
+  const [exportModalOpen, setExportModalOpen] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const toastIdRef = useRef(1);
 
@@ -144,6 +156,10 @@ export default function App() {
   const rebuildEditedLayer = useCallback((
     layer: LayerEntry,
     svgString: string,
+    editPrimitives?: (
+      primitives: LayerPrimitives | undefined,
+      geometry: ReturnType<typeof extractLayerGeometry>,
+    ) => LayerPrimitives | undefined,
   ): LayerEntry => {
     const result = { ...layer.result, svgString };
     const geometry = extractLayerGeometry(svgString, layer.id, layer.layerType, layer.result.units);
@@ -156,10 +172,11 @@ export default function App() {
       geometry,
       layer.drillSettings,
     );
-    // NOTE: SVG edits (pad resize etc.) do not flow into kernel primitives —
-    // the kernel keeps working from the original file geometry. The stale
-    // badge tells the user toolpaths no longer match the edited preview.
-    return { ...layer, result, geometry, importReport };
+    // Kernel primitives are re-derived from the SAME edit, correlated back
+    // by position/width class (kernelBridge.ts editKernel*) — not re-parsed
+    // from the original file, which would silently discard the edit.
+    const primitives = editPrimitives ? editPrimitives(layer.primitives, geometry) : layer.primitives;
+    return { ...layer, result, geometry, importReport, primitives };
   }, []);
 
   const toggleLayer = useCallback((id: string) => {
@@ -209,31 +226,65 @@ export default function App() {
 
   const updatePadSize = useCallback((layerId: string, defId: string, newDiameterMm: number) => {
     commitLayers((layers) => layers.map((l) => (
-      l.id === layerId ? rebuildEditedLayer(l, editPadSize(l.result.svgString, defId, newDiameterMm, l.result.units)) : l
+      l.id === layerId
+        ? rebuildEditedLayer(
+            l,
+            editPadSize(l.result.svgString, defId, newDiameterMm, l.result.units),
+            (primitives, geometry) => editKernelPadSize(primitives, geometry, defId, newDiameterMm),
+          )
+        : l
     )));
   }, [commitLayers, rebuildEditedLayer]);
 
   const updateTraceWidth = useCallback((layerId: string, oldRaw: number, newWidthMm: number) => {
     commitLayers((layers) => layers.map((l) => (
-      l.id === layerId ? rebuildEditedLayer(l, editTraceWidth(l.result.svgString, oldRaw, newWidthMm, l.result.units)) : l
+      l.id === layerId
+        ? rebuildEditedLayer(
+            l,
+            editTraceWidth(l.result.svgString, oldRaw, newWidthMm, l.result.units),
+            (primitives) => {
+              const scale = l.result.units === 'in' ? 25.4 : 1;
+              const oldWidthMm = (oldRaw / 1000) * scale;
+              return editKernelTraceWidth(primitives, oldWidthMm, newWidthMm);
+            },
+          )
+        : l
     )));
   }, [commitLayers, rebuildEditedLayer]);
 
   const updateSinglePadSize = useCallback((layerId: string, defId: string, instanceId: string, newDiameterMm: number) => {
     commitLayers((layers) => layers.map((l) => (
-      l.id === layerId ? rebuildEditedLayer(l, editSinglePadSize(l.result.svgString, defId, instanceId, newDiameterMm, l.result.units)) : l
+      l.id === layerId
+        ? rebuildEditedLayer(
+            l,
+            editSinglePadSize(l.result.svgString, defId, instanceId, newDiameterMm, l.result.units),
+            (primitives, geometry) => editKernelSinglePadSize(primitives, geometry, instanceId, newDiameterMm),
+          )
+        : l
     )));
   }, [commitLayers, rebuildEditedLayer]);
 
   const updateSingleTrace = useCallback((layerId: string, pathId: string, newWidthMm: number) => {
     commitLayers((layers) => layers.map((l) => (
-      l.id === layerId ? rebuildEditedLayer(l, editSingleTraceWidth(l.result.svgString, pathId, newWidthMm, l.result.units)) : l
+      l.id === layerId
+        ? rebuildEditedLayer(
+            l,
+            editSingleTraceWidth(l.result.svgString, pathId, newWidthMm, l.result.units),
+            (primitives) => editKernelSingleTraceWidth(primitives, l.result.svgString, pathId, newWidthMm, l.result.units),
+          )
+        : l
     )));
   }, [commitLayers, rebuildEditedLayer]);
 
   const updateHoleDiameter = useCallback((layerId: string, defId: string, newDiameterMm: number) => {
     commitLayers((layers) => layers.map((l) => (
-      l.id === layerId ? rebuildEditedLayer(l, editHoleDiameter(l.result.svgString, defId, newDiameterMm, l.result.units)) : l
+      l.id === layerId
+        ? rebuildEditedLayer(
+            l,
+            editHoleDiameter(l.result.svgString, defId, newDiameterMm, l.result.units),
+            (primitives, geometry) => editKernelHoleDiameter(primitives, geometry, defId, newDiameterMm),
+          )
+        : l
     )));
   }, [commitLayers, rebuildEditedLayer]);
 
@@ -281,6 +332,11 @@ export default function App() {
           if (layer.layerType === 'bottom-copper' && c?.kind === 'isolation' && !c.mirror) {
             next[layer.id] = { ...c, mirror: true };
           }
+          const hatchKey = hatchingKeyFor(layer.id);
+          const hc = next[hatchKey];
+          if (layer.layerType === 'bottom-copper' && hc?.kind === 'hatching' && !hc.mirror) {
+            next[hatchKey] = { ...hc, mirror: true };
+          }
         }
       }
       return next;
@@ -293,7 +349,9 @@ export default function App() {
   const hiddenOpIds = useMemo(() => {
     const hidden = new Set<string>();
     for (const [key, config] of Object.entries(opConfigs)) {
-      if (!config.overlayVisible) hidden.add(opIdFor(key, config));
+      // opIdFor expects the real layer id, not hatching's compound map key
+      // (`hatching:${layerId}`) — see hatchingKeyFor/layerIdForConfigKey.
+      if (!config.overlayVisible) hidden.add(opIdFor(layerIdForConfigKey(key), config));
     }
     if (soloLayerId && camResult) {
       for (const op of camResult.operations) {
@@ -426,6 +484,11 @@ export default function App() {
         if (layer.layerType === 'bottom-copper' && c?.kind === 'isolation' && !c.mirror) {
           enabledConfigs[layer.id] = { ...c, mirror: true };
         }
+        const hatchKey = hatchingKeyFor(layer.id);
+        const hc = enabledConfigs[hatchKey];
+        if (layer.layerType === 'bottom-copper' && hc?.kind === 'hatching' && !hc.mirror) {
+          enabledConfigs[hatchKey] = { ...hc, mirror: true };
+        }
       }
     }
     setOpConfigs(enabledConfigs);
@@ -454,56 +517,73 @@ export default function App() {
     }
   }, [state.layers, opConfigs, stockConfig, pushToast]);
 
-  const exportKernelHpgl = useCallback(async () => {
-    if (!camResult || camResult.operations.length === 0) return;
-    try {
-      // Machine origin = stock bottom-left corner (circuit coords minus the
-      // configured placement offset).
-      const offsetX = stockConfig.auto ? AUTO_STOCK_MARGIN_MM : stockConfig.offsetXMm;
-      const offsetY = stockConfig.auto ? AUTO_STOCK_MARGIN_MM : stockConfig.offsetYMm;
-      const circuitMin = camJob.boardBounds
-        ? { x: camJob.boardBounds[0] / 1000, y: camJob.boardBounds[1] / 1000 }
-        : { x: 0, y: 0 };
-      const exportOpts = {
-        absoluteOriginMm: { x: circuitMin.x - offsetX, y: circuitMin.y - offsetY },
-        mirrorAxis: camResult.mirrorAxis,
-      };
+  // Pure builder — one file per operation, numbered in machining order.
+  // The Export modal owns packaging (zip) and download; this only decides
+  // WHAT the files are, so it stays reusable if formats besides HPGL need
+  // the same op-ordering logic later.
+  const buildHpglExportFiles = useCallback((): ExportFile[] => {
+    if (!camResult || camResult.operations.length === 0) return [];
+    // Machine origin = stock bottom-left corner (circuit coords minus the
+    // configured placement offset).
+    const offsetX = stockConfig.auto ? AUTO_STOCK_MARGIN_MM : stockConfig.offsetXMm;
+    const offsetY = stockConfig.auto ? AUTO_STOCK_MARGIN_MM : stockConfig.offsetYMm;
+    const circuitMin = camJob.boardBounds
+      ? { x: camJob.boardBounds[0] / 1000, y: camJob.boardBounds[1] / 1000 }
+      : { x: 0, y: 0 };
+    const exportOpts = {
+      absoluteOriginMm: { x: circuitMin.x - offsetX, y: circuitMin.y - offsetY },
+      mirrorAxis: camResult.mirrorAxis,
+    };
 
-      // One file per operation, numbered in machining order.
-      const layerTypeById = new Map(state.layers.map((l) => [l.id, l.layerType]));
-      const layerFileById = new Map(state.layers.map((l) => [l.id, l.file.name]));
-      const orderOf = (op: (typeof camResult.operations)[number]): number => {
-        if (op.kind === 'centering') return 0;
-        if (op.kind === 'isolation') {
-          return layerTypeById.get(op.layerId) === 'bottom-copper' ? 2 : 1;
-        }
-        return op.kind === 'drill' ? 3 : 4;
-      };
-      const ordered = [...camResult.operations].sort((a, b) => orderOf(a) - orderOf(b));
+    const layerTypeById = new Map(state.layers.map((l) => [l.id, l.layerType]));
+    const layerFileById = new Map(state.layers.map((l) => [l.id, l.file.name]));
+    const orderOf = (op: (typeof camResult.operations)[number]): number => {
+      if (op.kind === 'centering') return 0;
+      const bottom = layerTypeById.get(op.layerId) === 'bottom-copper';
+      if (op.kind === 'isolation') return bottom ? 2 : 1;
+      // Right after isolation for the same side, ahead of drill/cutout.
+      if (op.kind === 'hatching') return bottom ? 4 : 3;
+      return op.kind === 'drill' ? 5 : 6;
+    };
+    const ordered = [...camResult.operations].sort((a, b) => orderOf(a) - orderOf(b));
 
-      for (let i = 0; i < ordered.length; i++) {
-        const op = ordered[i];
-        const { text } = exportHpgl([op], exportOpts);
-        const base =
-          op.kind === 'centering'
-            ? 'centering'
-            : `${op.kind}-${sanitizeName(layerFileById.get(op.layerId) ?? op.layerId)}`;
-        const name = `${String(i + 1).padStart(2, '0')}-${base}${op.mirror ? '-mirrored' : ''}.hpgl`;
-        const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement('a');
-        link.href = url;
-        link.download = name;
-        link.click();
-        URL.revokeObjectURL(url);
-        // Give the browser breathing room between programmatic downloads.
-        if (i < ordered.length - 1) await new Promise((r) => setTimeout(r, 350));
-      }
-      pushToast('info', `Exported ${ordered.length} HPGL file(s) in machining order.`);
-    } catch (err) {
-      pushToast('error', `HPGL export failed: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }, [camResult, stockConfig, camJob.boardBounds, state.layers, pushToast]);
+    return ordered.map((op, i) => {
+      const { text } = exportHpgl([op], exportOpts);
+      const base =
+        op.kind === 'centering'
+          ? 'centering'
+          : `${op.kind}-${sanitizeName(layerFileById.get(op.layerId) ?? op.layerId)}`;
+      const name = `${String(i + 1).padStart(2, '0')}-${base}${op.mirror ? '-mirrored' : ''}.plt`;
+      return { name, content: text };
+    });
+  }, [camResult, stockConfig, camJob.boardBounds, state.layers]);
+
+  const exportProjectName = useMemo(
+    () => sanitizeName(deriveProjectName(state.layers.map((l) => l.file.name))),
+    [state.layers],
+  );
+
+  // Format list for the Export modal. Only HPGL is implemented today —
+  // adding G-code (or anything else) later is just another entry here with
+  // its own buildFiles; formats without one render disabled ("coming soon").
+  const exportFormats: ExportFormatOption[] = useMemo(
+    () => [
+      {
+        id: 'hpgl',
+        label: 'HPGL / PLT',
+        extension: 'plt',
+        description: 'Bungard-compatible HPGL2 — one file per operation, in machining order.',
+        buildFiles: buildHpglExportFiles,
+      },
+      {
+        id: 'gcode',
+        label: 'G-code',
+        extension: 'nc',
+        description: 'Not implemented yet.',
+      },
+    ],
+    [buildHpglExportFiles],
+  );
 
   const { layers, parsing, errors } = state;
   const hasLayers = layers.length > 0 || parsing || errors.length > 0;
@@ -520,13 +600,25 @@ export default function App() {
           <HeaderButton onClick={undo} disabled={state.past.length === 0}>Undo</HeaderButton>
           <HeaderButton onClick={redo} disabled={state.future.length === 0}>Redo</HeaderButton>
           <HeaderButton
-            onClick={exportKernelHpgl}
+            onClick={() => setExportModalOpen(true)}
             disabled={!camResult || camResult.operations.length === 0 || camStale}
           >
-            Export HPGL
+            Export
           </HeaderButton>
         </div>
       </header>
+
+      {exportModalOpen && (
+        <ExportModal
+          formats={exportFormats}
+          projectName={exportProjectName}
+          onClose={() => setExportModalOpen(false)}
+          onExported={(formatLabel, count) =>
+            pushToast('info', `Exported ${count} ${formatLabel} file(s) as a zip.`)
+          }
+          onError={(message) => pushToast('error', message)}
+        />
+      )}
 
       <div className="flex flex-1 overflow-hidden">
         {hasLayers && (
@@ -551,7 +643,6 @@ export default function App() {
               onOpConfigChange={setOpConfig}
               onGenerate={generateToolpaths}
               onGenerateCentering={generateCentering}
-              onExport={exportKernelHpgl}
               kernelBusy={kernelBusy}
               camResult={camResult}
               camStale={camStale}
@@ -609,6 +700,31 @@ function sanitizeName(name: string): string {
     .replace(/\.[^.]+$/, '')
     .replace(/[^a-zA-Z0-9_-]+/g, '_')
     .slice(0, 40);
+}
+
+/**
+ * Best-effort project name from loaded layer filenames: the longest common
+ * prefix across all basenames — KiCad/Altium/Eagle etc. all share one
+ * project prefix before the per-layer suffix (e.g. "Board-F_Cu.gbr" /
+ * "Board-B_Cu.gbr" / "Board.drl" → "Board"). With only one file loaded
+ * there's nothing to compare against, so instead trim its own trailing
+ * "-suffix" segment (KiCad's project/layer separator is the LAST dash).
+ */
+function deriveProjectName(fileNames: string[]): string {
+  const bases = fileNames.map((f) => f.replace(/\.[a-z0-9]+$/i, '')).filter(Boolean);
+  if (bases.length === 0) return 'pathkernel';
+  if (bases.length === 1) {
+    const stripped = bases[0].replace(/-[^-]+$/, '');
+    return stripped || bases[0];
+  }
+  let prefix = bases[0];
+  for (const base of bases.slice(1)) {
+    let i = 0;
+    while (i < prefix.length && i < base.length && prefix[i] === base[i]) i++;
+    prefix = prefix.slice(0, i);
+  }
+  prefix = prefix.replace(/[-_.\s]+$/, '');
+  return prefix || bases[0];
 }
 
 function readFileAsText(file: File): Promise<string> {

@@ -9,7 +9,8 @@
  * placed further out along the same axis for pin redundancy/rigidity.
  */
 import { boreHole } from './drilling';
-import { pathLength } from './geom2d';
+import { flattenStroke, pathLength } from './geom2d';
+import { fixedEntryUnit, reorderForTravel, type TravelUnit } from './pathOrder';
 import type {
   CenteringParams,
   KernelOpResult,
@@ -93,15 +94,19 @@ export function buildCenteringHoles(input: CenteringInput): KernelOpResult {
   let boreHoleCount = 0;
   let borePassCount = 0;
 
+  const holeUnits: TravelUnit[] = [];
   for (const center of centers) {
     const bored = boreHole(center.x, center.y, holeDia, toolDia, stepoverMm);
-    strokes.push(...bored.strokes);
-    previewPolylines.push(...bored.polylines);
+    holeUnits.push(fixedEntryUnit(bored.strokes));
     plungeCount++;
     if (bored.borePasses > 0) {
       boreHoleCount++;
       borePassCount += bored.borePasses;
     }
+  }
+  for (const s of reorderForTravel(holeUnits, { x: 0, y: 0 })) {
+    strokes.push(s);
+    previewPolylines.push(flattenStroke(s));
   }
 
   const warnings: string[] = [];

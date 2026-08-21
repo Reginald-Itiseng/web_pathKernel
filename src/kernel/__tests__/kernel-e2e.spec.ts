@@ -9,7 +9,14 @@ import { initClipper, polygonSetArea } from '../clip';
 import { runKernelJob } from '../index';
 import { exportHpgl } from '../hpgl';
 import { ingestTracespace } from '../ingest/tracespace';
-import type { KernelJobInput, KernelJobResult } from '../types';
+import type { KernelJobInput, KernelJobResult, KPoint, Stroke } from '../types';
+
+function strokeEndpoints(stroke: Stroke): { start: KPoint; end: KPoint } {
+  if (stroke.type === 'polyline') {
+    return { start: stroke.points[0], end: stroke.points[stroke.points.length - 1] };
+  }
+  return { start: stroke.start, end: stroke.end };
+}
 
 const FIXTURE_DIR = join(__dirname, '../../../test_gerbers/motor_driver');
 
@@ -85,13 +92,32 @@ describe('kernel end-to-end on motor_driver', () => {
     expect(iso.strokes.length).toBeGreaterThan(4);
     expect(iso.stats.pathLengthMm).toBeGreaterThan(50);
     expect(iso.stats.pathLengthMm).toBeLessThan(100_000);
-    // Every isolation stroke is a closed loop.
+
+    // Round pad contours can now be split into a mix of line/arc pieces
+    // (arcFit.ts) instead of one polyline per ring, so closure is checked
+    // across each stitched chain of consecutive touching pieces — not per
+    // individual stroke, which would no longer hold for an arc-fitted ring.
+    const tol = 1e-6;
+    let chainStart: KPoint | null = null;
+    let chainEnd: KPoint | null = null;
+    let chainCount = 0;
+    const closeChain = (): void => {
+      if (!chainStart || !chainEnd) return;
+      expect(Math.hypot(chainStart.x - chainEnd.x, chainStart.y - chainEnd.y)).toBeLessThan(tol);
+      chainCount++;
+    };
     for (const stroke of iso.strokes) {
-      if (stroke.type !== 'polyline') continue;
-      const first = stroke.points[0];
-      const last = stroke.points[stroke.points.length - 1];
-      expect(Math.hypot(first.x - last.x, first.y - last.y)).toBeLessThan(1e-6);
+      const { start, end } = strokeEndpoints(stroke);
+      if (chainEnd && Math.hypot(start.x - chainEnd.x, start.y - chainEnd.y) <= tol) {
+        chainEnd = end;
+      } else {
+        closeChain();
+        chainStart = start;
+        chainEnd = end;
+      }
     }
+    closeChain();
+    expect(chainCount).toBeGreaterThan(0);
   });
 
   it('drill emits a plunge for every drillable hole and arcs for larger ones', () => {

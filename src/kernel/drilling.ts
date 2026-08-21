@@ -6,7 +6,8 @@
  * HPGL export emits an explicit pen-down), then if the hole is larger than the
  * tool, bore concentric full-circle passes at the radial stepover.
  */
-import { flattenArc, pathLength } from './geom2d';
+import { flattenArc, flattenStroke, pathLength } from './geom2d';
+import { fixedEntryUnit, reorderForTravel, type TravelUnit } from './pathOrder';
 import type { DrillFeature, DrillParams, KernelOpResult, KPoint, Stroke } from './types';
 
 export interface DrillInput {
@@ -76,6 +77,10 @@ export function buildDrillToolpaths(input: DrillInput): KernelOpResult {
   let oversizedHoles = 0;
   let slotCount = 0;
 
+  // Each hole/slot's own plunge-then-cut sequence must never be reversed
+  // (fixedEntryUnit) — only WHICH hole comes next is up for grabs.
+  const holeUnits: TravelUnit[] = [];
+
   for (const hole of holes) {
     if (hole.type === 'slot') {
       if (hole.width < toolDia - 0.0005 && !params.allowOversizeForSmallHoles) {
@@ -86,17 +91,15 @@ export function buildDrillToolpaths(input: DrillInput): KernelOpResult {
 
       const start = hole.segments[0].start;
       const plungeEnd: KPoint = { x: start.x + EPSILON_PLUNGE, y: start.y };
-      strokes.push({ type: 'line', start, end: plungeEnd });
-      previewPolylines.push([start, plungeEnd]);
+      const slotStrokes: Stroke[] = [{ type: 'line', start, end: plungeEnd }];
       for (const segment of hole.segments) {
         if (segment.type === 'line') {
-          strokes.push(segment);
-          previewPolylines.push([segment.start, segment.end]);
+          slotStrokes.push(segment);
         } else {
-          strokes.push({ type: 'arc', start: segment.start, end: segment.end, center: segment.center, ccw: segment.ccw });
-          previewPolylines.push(flattenArc(segment.start, segment.end, segment.center, segment.ccw));
+          slotStrokes.push({ type: 'arc', start: segment.start, end: segment.end, center: segment.center, ccw: segment.ccw });
         }
       }
+      holeUnits.push(fixedEntryUnit(slotStrokes));
       plungeCount++;
       slotCount++;
       continue;
@@ -112,13 +115,20 @@ export function buildDrillToolpaths(input: DrillInput): KernelOpResult {
     }
 
     const bored = boreHole(hole.x, hole.y, hole.diameter, toolDia, stepoverMm);
-    strokes.push(...bored.strokes);
-    previewPolylines.push(...bored.polylines);
+    holeUnits.push(fixedEntryUnit(bored.strokes));
     plungeCount++;
     if (bored.borePasses > 0) {
       boreHoleCount++;
       borePassCount += bored.borePasses;
     }
+  }
+
+  // Nearest-neighbor sequencing across holes — visit whichever unvisited
+  // hole is closest to wherever the tool just finished, instead of drill
+  // (Excellon) file order.
+  for (const s of reorderForTravel(holeUnits, { x: 0, y: 0 })) {
+    strokes.push(s);
+    previewPolylines.push(flattenStroke(s));
   }
 
   if (strokes.length === 0) {

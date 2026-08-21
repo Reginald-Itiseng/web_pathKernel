@@ -17,6 +17,7 @@ const BoardViewport3D = lazy(() =>
 
 export const TOOLPATH_COLORS: Record<OperationKind, string> = {
   isolation: '#f0f',
+  hatching: '#f0b429',
   drill: '#22d3ee',
   cutout: '#4ade80',
   centering: '#79c0ff',
@@ -63,6 +64,7 @@ export function GerberPreview({
   const [selection, setSelection] = useState<ElementSelection | null>(null);
   const [overlayVisible, setOverlayVisible] = useState<Record<OperationKind, boolean>>({
     isolation: true,
+    hatching: true,
     drill: true,
     cutout: true,
     centering: true,
